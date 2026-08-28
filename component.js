@@ -266,6 +266,8 @@ class WatchTogetherApp {
     this.video =
       null;
 
+    this.selectedAudioTrackIndex = 0;
+
     /*
       MOVIE AUDIO
 
@@ -2731,8 +2733,19 @@ class WatchTogetherApp {
                   </option>
 
                 </select>
-
+                
                 <select
+                    class="wt-speed"
+                    id="audio-track"
+                    aria-label="Audio language"
+                    title="Choose your movie audio language"
+                  >
+                    <option value="">
+                      🔈 Audio
+                    </option>
+                  </select>
+
+                                  <select
                   class="wt-speed"
                   id="speed"
                   aria-label="Playback speed"
@@ -2985,46 +2998,84 @@ class WatchTogetherApp {
       );
 
     this.video.addEventListener(
-      "loadedmetadata",
-      () => {
-        this.root
-          .querySelector(
-            "#video-empty"
-          )
-          ?.classList.add(
-            "wt-hidden"
-          );
+  "loadedmetadata",
+  () => {
+    this.root
+      .querySelector(
+        "#video-empty"
+      )
+      ?.classList.add(
+        "wt-hidden"
+      );
 
-        const timeline =
-          this.root.querySelector(
-            "#timeline"
-          );
+    const timeline =
+      this.root.querySelector(
+        "#timeline"
+      );
 
-        if (
-          timeline
-        ) {
-          timeline.max =
-            String(
-              this.video.duration ||
-              this.fileDuration ||
-              1
-            );
+    if (
+      timeline
+    ) {
+      timeline.max =
+        String(
+          this.video.duration ||
+          this.fileDuration ||
+          1
+        );
+    }
+
+    /*
+      AUDIO LANGUAGE TRACKS
+
+      After the browser reads the movie metadata,
+      check whether it exposes multiple audio tracks.
+    */
+
+    this.refreshAudioTrackSelector();
+
+    const tracks =
+      this.video.audioTracks;
+
+    if (
+      tracks?.addEventListener
+    ) {
+      tracks.addEventListener(
+        "addtrack",
+        () =>
+          this.refreshAudioTrackSelector()
+      );
+
+      tracks.addEventListener(
+        "removetrack",
+        () =>
+          this.refreshAudioTrackSelector()
+      );
+
+      tracks.addEventListener(
+        "change",
+        () =>
+          this.refreshAudioTrackSelector()
+      );
+    }
+
+    /*
+      Participant asks host for current
+      playback state after movie loads.
+    */
+
+    if (
+      !this.isHost
+    ) {
+      this.send(
+        "state-request",
+        {
+          from:
+            this.peerId,
         }
-
-        if (
-          !this.isHost
-        ) {
-          this.send(
-            "state-request",
-            {
-              from:
-                this.peerId,
-            }
-          );
-        }
-      }
-    );
-
+      );
+    }
+  }
+);
     this.video.addEventListener(
       "play",
       () => {
@@ -3791,6 +3842,357 @@ class WatchTogetherApp {
       } catch {}
     }
   }
+
+  languageName(code = "") {
+  const normalized =
+    String(code || "")
+      .trim()
+      .toLowerCase();
+
+  if (!normalized) {
+    return "";
+  }
+
+  const languages = {
+    en: "English",
+    eng: "English",
+
+    hi: "Hindi",
+    hin: "Hindi",
+
+    ta: "Tamil",
+    tam: "Tamil",
+
+    te: "Telugu",
+    tel: "Telugu",
+
+    ml: "Malayalam",
+    mal: "Malayalam",
+
+    kn: "Kannada",
+    kan: "Kannada",
+
+    bn: "Bengali",
+    ben: "Bengali",
+
+    mr: "Marathi",
+    mar: "Marathi",
+
+    gu: "Gujarati",
+    guj: "Gujarati",
+
+    pa: "Punjabi",
+    pan: "Punjabi",
+
+    ur: "Urdu",
+    urd: "Urdu",
+
+    ja: "Japanese",
+    jpn: "Japanese",
+
+    ko: "Korean",
+    kor: "Korean",
+
+    zh: "Chinese",
+    zho: "Chinese",
+    chi: "Chinese",
+
+    es: "Spanish",
+    spa: "Spanish",
+
+    fr: "French",
+    fra: "French",
+    fre: "French",
+
+    de: "German",
+    deu: "German",
+    ger: "German",
+
+    it: "Italian",
+    ita: "Italian",
+
+    pt: "Portuguese",
+    por: "Portuguese",
+
+    ru: "Russian",
+    rus: "Russian",
+
+    ar: "Arabic",
+    ara: "Arabic",
+  };
+
+  if (
+    languages[normalized]
+  ) {
+    return languages[
+      normalized
+    ];
+  }
+
+  try {
+    const display =
+      new Intl.DisplayNames(
+        [
+          navigator.language ||
+          "en",
+        ],
+        {
+          type:
+            "language",
+        }
+      );
+
+    return (
+      display.of(
+        normalized
+      ) ||
+      normalized.toUpperCase()
+    );
+
+  } catch {
+    return normalized.toUpperCase();
+  }
+}
+
+
+audioTrackLabel(
+  track,
+  index
+) {
+  const language =
+    this.languageName(
+      track?.language ||
+      ""
+    );
+
+  const label =
+    String(
+      track?.label ||
+      ""
+    ).trim();
+
+  if (
+    language &&
+    label &&
+    !label
+      .toLowerCase()
+      .includes(
+        language.toLowerCase()
+      )
+  ) {
+    return `${language} · ${label}`;
+  }
+
+  if (language) {
+    return language;
+  }
+
+  if (label) {
+    return label;
+  }
+
+  return `Audio ${index + 1}`;
+}
+
+
+refreshAudioTrackSelector() {
+  const select =
+    this.root.querySelector(
+      "#audio-track"
+    );
+
+  if (
+    !select ||
+    !this.video
+  ) {
+    return;
+  }
+
+  const tracks =
+    this.video.audioTracks;
+
+  /*
+    Some browsers, especially Chrome with
+    certain MKV files, don't expose
+    HTMLMediaElement.audioTracks.
+
+    In that situation we leave playback alone.
+  */
+
+  if (
+    !tracks ||
+    typeof tracks.length !==
+      "number" ||
+    tracks.length === 0
+  ) {
+    select.innerHTML = `
+      <option value="">
+        🔈 Browser audio
+      </option>
+    `;
+
+    select.disabled =
+      true;
+
+    select.title =
+      "This browser does not expose the embedded audio tracks of this movie.";
+
+    return;
+  }
+
+  let enabledIndex =
+    -1;
+
+  const options =
+    [];
+
+  for (
+    let i = 0;
+    i < tracks.length;
+    i += 1
+  ) {
+    const track =
+      tracks[i];
+
+    if (
+      track?.enabled
+    ) {
+      enabledIndex =
+        i;
+    }
+
+    const label =
+      this.audioTrackLabel(
+        track,
+        i
+      );
+
+    options.push(`
+      <option value="${i}">
+        ${esc(label)}
+      </option>
+    `);
+  }
+
+  if (
+    enabledIndex < 0
+  ) {
+    enabledIndex =
+      clamp(
+        this.selectedAudioTrackIndex ||
+        0,
+        0,
+        tracks.length -
+        1
+      );
+  }
+
+  this.selectedAudioTrackIndex =
+    enabledIndex;
+
+  select.innerHTML =
+    options.join("");
+
+  select.value =
+    String(
+      enabledIndex
+    );
+
+  /*
+    If the file contains only one exposed
+    audio track there is nothing to switch.
+  */
+
+  select.disabled =
+    tracks.length <
+    2;
+
+  if (
+    tracks.length >
+    1
+  ) {
+    select.title =
+      "Choose your audio language. This choice affects only you.";
+
+  } else {
+    select.title =
+      "Only one audio track is available.";
+  }
+}
+
+
+selectAudioTrack(index) {
+  if (
+    !this.video
+  ) {
+    return;
+  }
+
+  const tracks =
+    this.video.audioTracks;
+
+  if (
+    !tracks ||
+    index < 0 ||
+    index >=
+      tracks.length
+  ) {
+    this.toast(
+      "This browser does not expose that movie audio track.",
+      "bad"
+    );
+
+    return;
+  }
+
+  try {
+    /*
+      Disable all tracks except the
+      user's selected language.
+    */
+
+    for (
+      let i = 0;
+      i < tracks.length;
+      i += 1
+    ) {
+      tracks[i].enabled =
+        i ===
+        index;
+    }
+
+    this.selectedAudioTrackIndex =
+      index;
+
+    const selected =
+      tracks[index];
+
+    const name =
+      this.audioTrackLabel(
+        selected,
+        index
+      );
+
+    this.refreshAudioTrackSelector();
+
+    this.toast(
+      `Audio changed to ${name} ✓`,
+      "good"
+    );
+
+  } catch (error) {
+    console.warn(
+      "Audio track switching is not available",
+      error
+    );
+
+    this.toast(
+      "Your browser does not allow audio-track switching for this movie.",
+      "bad"
+    );
+  }
+}
+
 
   updatePlayIcon() {
     const btn =
