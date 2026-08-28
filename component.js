@@ -1,6 +1,7 @@
 const CDN_SUPABASE = "https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/+esm";
 const CDN_HASH = "https://cdn.jsdelivr.net/npm/hash-wasm@4.12.0/+esm";
-const CDN_MEDIABUNNY = "https://cdn.jsdelivr.net/npm/mediabunny@1.55.3/dist/bundles/mediabunny.cjs";
+const CDN_MEDIABUNNY =
+  "https://cdn.jsdelivr.net/npm/mediabunny@1.55.3/dist/bundles/mediabunny.mjs";
 const CDN_MEDIABUNNY_AC3 = "https://cdn.jsdelivr.net/npm/@mediabunny/ac3@1.55.3/dist/bundles/mediabunny-ac3.js";
 const CDN_MEDIABUNNY_DTS = "https://cdn.jsdelivr.net/npm/@mediabunny/dts@1.55.3/dist/bundles/mediabunny-dts.js";
 
@@ -3077,6 +3078,36 @@ class WatchTogetherApp {
    * ============================================================
    */
 
+  async loadBrowserModule(src, globalName) {
+  if (
+    globalName &&
+    globalThis[globalName]
+  ) {
+    return globalThis[
+      globalName
+    ];
+  }
+
+  const module =
+    await import(src);
+
+  /*
+   * The AC3/DTS extension scripts expect
+   * Mediabunny to exist globally.
+   *
+   * We load the proper browser ESM build,
+   * then expose that exact module instance.
+   */
+
+  if (globalName) {
+    globalThis[
+      globalName
+    ] = module;
+  }
+
+  return module;
+}
+
   async loadBrowserScript(
     src,
     globalName
@@ -3219,10 +3250,10 @@ class WatchTogetherApp {
           }
 
           const mb =
-            await this.loadBrowserScript(
-              CDN_MEDIABUNNY,
-              "Mediabunny"
-            );
+  await this.loadBrowserModule(
+    CDN_MEDIABUNNY,
+    "Mediabunny"
+  );
 
           this.mediaBunny =
             mb;
