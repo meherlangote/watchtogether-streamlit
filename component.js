@@ -3,25 +3,34 @@ const CDN_HASH = "https://cdn.jsdelivr.net/npm/hash-wasm@4.12.0/+esm";
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 const clamp = (n, min, max) => Math.min(max, Math.max(min, n));
-const esc = (value = "") => String(value)
-  .replaceAll("&", "&amp;")
-  .replaceAll("<", "&lt;")
-  .replaceAll(">", "&gt;")
-  .replaceAll('"', "&quot;")
-  .replaceAll("'", "&#039;");
+
+const esc = (value = "") =>
+  String(value)
+    .replaceAll("&", "&amp;")
+    .replaceAll("<", "&lt;")
+    .replaceAll(">", "&gt;")
+    .replaceAll('"', "&quot;")
+    .replaceAll("'", "&#039;");
 
 function formatBytes(bytes) {
   if (!Number.isFinite(bytes) || bytes <= 0) return "0 B";
+
   const units = ["B", "KB", "MB", "GB", "TB"];
-  const i = Math.min(Math.floor(Math.log(bytes) / Math.log(1024)), units.length - 1);
+  const i = Math.min(
+    Math.floor(Math.log(bytes) / Math.log(1024)),
+    units.length - 1
+  );
+
   return `${(bytes / Math.pow(1024, i)).toFixed(i > 2 ? 2 : 1)} ${units[i]}`;
 }
 
 function formatTime(value) {
   const seconds = Math.max(0, Math.floor(Number(value) || 0));
+
   const h = Math.floor(seconds / 3600);
   const m = Math.floor((seconds % 3600) / 60);
   const s = seconds % 60;
+
   return h > 0
     ? `${String(h).padStart(2, "0")}:${String(m).padStart(2, "0")}:${String(s).padStart(2, "0")}`
     : `${String(m).padStart(2, "0")}:${String(s).padStart(2, "0")}`;
@@ -29,114 +38,317 @@ function formatTime(value) {
 
 function randomRoomCode() {
   const alphabet = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
-  const bytes = crypto.getRandomValues(new Uint8Array(6));
-  return "WATCH-" + Array.from(bytes, (b) => alphabet[b % alphabet.length]).join("");
+
+  const bytes = crypto.getRandomValues(
+    new Uint8Array(6)
+  );
+
+  return (
+    "WATCH-" +
+    Array.from(
+      bytes,
+      (b) => alphabet[b % alphabet.length]
+    ).join("")
+  );
 }
 
 function safeRoomCode(value) {
-  const code = String(value || "").trim().toUpperCase().replace(/[^A-Z0-9-]/g, "");
-  return code.startsWith("WATCH-") ? code.slice(0, 18) : code.slice(0, 18);
+  const code = String(value || "")
+    .trim()
+    .toUpperCase()
+    .replace(/[^A-Z0-9-]/g, "");
+
+  return code.startsWith("WATCH-")
+    ? code.slice(0, 18)
+    : code.slice(0, 18);
 }
 
 class WatchTogetherApp {
   constructor(root, config) {
     this.root = root;
-    this.config = config || {};
+
+    this.config =
+      config || {};
+
     this.supabase = null;
+
     this.hashWasm = null;
+
     this.channel = null;
 
-    this.phase = this.config.roomFromUrl ? "join" : "landing";
-    this.peerId = crypto.randomUUID();
-    this.name = "";
-    this.roomCode = safeRoomCode(this.config.roomFromUrl || "");
-    this.creating = false;
-    this.connected = false;
-    this.connectionStatus = "offline";
-    this.participants = new Map();
-    this.previousParticipantIds = new Set();
-    this.hostId = null;
-    this.isHost = false;
-    this.joinedAt = Date.now();
-    this.locked = false;
-    this.lockedAt = 0;
+    /*
+      IMPORTANT:
 
-    this.file = null;
-    this.fileUrl = "";
-    this.fileHash = "";
-    this.fileDuration = 0;
-    this.hashProgress = 0;
-    this.hashing = false;
-    this.verified = false;
-    this.verifyMessage = "";
+      Always trust the room code currently visible
+      in the browser URL.
 
-    this.localStream = null;
-    this.remoteStreams = new Map();
-    this.pcs = new Map();
-    this.iceQueues = new Map();
-    this.micEnabled = false;
-    this.camEnabled = false;
+      Streamlit can temporarily retain the previous
+      roomFromUrl value after JavaScript removes ?room=.
 
-    this.chat = [];
-    this.authoritative = null;
-    this.revision = 0;
-    this.lastAppliedRevision = -1;
-    this.clockSamples = [];
-    this.clockOffset = 0;
-    this.clockRtt = null;
-    this.seekCooldownUntil = 0;
-    this.driftMs = 0;
-    this.syncLabel = "Waiting for playback";
-    this.syncTimer = null;
-    this.uiTimer = null;
-    this.clockTimer = null;
-    this.reconnectTimer = null;
-    this.destroyed = false;
+      That was causing:
 
-    this.video = null;
+      Leave
+        ↓
+      Home page
+        ↓
+      Automatically reconnect old room
+    */
 
-    // Movie audio stays completely local in the browser.
-    // Compatibility mode explicitly mixes surround channels into stereo
-    // so BGM/effects are not lost on headphones/laptop speakers.
-    this.audioContext = null;
-    this.movieAudioSource = null;
-    this.movieAudioNodes = [];
-    this.movieAudioMaster = null;
-    this.movieAudioMode = "compat";
-    this.movieVolume = 1;
+    const browserRoom = (() => {
+      try {
+        return safeRoomCode(
+          new URL(window.location.href)
+            .searchParams
+            .get("room") || ""
+        );
+      } catch {
+        return "";
+      }
+    })();
+
+    this.phase =
+      browserRoom
+        ? "join"
+        : "landing";
+
+    this.peerId =
+      crypto.randomUUID();
+
+    this.name =
+      "";
+
+    this.roomCode =
+      browserRoom;
+
+    this.creating =
+      false;
+
+    this.connected =
+      false;
+
+    this.connectionStatus =
+      "offline";
+
+    this.participants =
+      new Map();
+
+    this.previousParticipantIds =
+      new Set();
+
+    this.hostId =
+      null;
+
+    this.isHost =
+      false;
+
+    this.joinedAt =
+      Date.now();
+
+    this.locked =
+      false;
+
+    this.lockedAt =
+      0;
+
+    /*
+      MOVIE
+    */
+
+    this.file =
+      null;
+
+    this.fileUrl =
+      "";
+
+    this.fileHash =
+      "";
+
+    this.fileDuration =
+      0;
+
+    this.hashProgress =
+      0;
+
+    this.hashing =
+      false;
+
+    this.verified =
+      false;
+
+    this.verifyMessage =
+      "";
+
+    /*
+      CAMERA + MICROPHONE
+    */
+
+    this.localStream =
+      null;
+
+    this.microphoneDevices =
+      [];
+
+    this.micDeviceId =
+      "";
+
+    this.remoteStreams =
+      new Map();
+
+    this.pcs =
+      new Map();
+
+    this.iceQueues =
+      new Map();
+
+    this.micEnabled =
+      false;
+
+    this.camEnabled =
+      false;
+
+    /*
+      CHAT / SYNC
+    */
+
+    this.chat =
+      [];
+
+    this.authoritative =
+      null;
+
+    this.revision =
+      0;
+
+    this.lastAppliedRevision =
+      -1;
+
+    this.clockSamples =
+      [];
+
+    this.clockOffset =
+      0;
+
+    this.clockRtt =
+      null;
+
+    this.seekCooldownUntil =
+      0;
+
+    this.driftMs =
+      0;
+
+    this.syncLabel =
+      "Waiting for playback";
+
+    this.syncTimer =
+      null;
+
+    this.uiTimer =
+      null;
+
+    this.clockTimer =
+      null;
+
+    this.reconnectTimer =
+      null;
+
+    /*
+      Prevent reconnect after user intentionally
+      leaves or host ends a room.
+    */
+
+    this.intentionalDisconnect =
+      false;
+
+    this.destroyed =
+      false;
+
+    this.video =
+      null;
+
+    /*
+      MOVIE AUDIO
+
+      Movie remains entirely local.
+
+      Compatibility mode:
+
+      5.1 / 7.1
+          ↓
+      stereo downmix
+          ↓
+      speakers / headphones
+    */
+
+    this.audioContext =
+      null;
+
+    this.movieAudioSource =
+      null;
+
+    this.movieAudioNodes =
+      [];
+
+    this.movieAudioMaster =
+      null;
+
+    this.movieAudioMode =
+      "compat";
+
+    this.movieVolume =
+      1;
   }
 
   async init() {
-    this.renderLoading("Loading realtime services…");
+    this.renderLoading(
+      "Loading realtime services…"
+    );
 
     try {
-      const [supabaseModule, hashModule] = await Promise.all([
-        import(CDN_SUPABASE),
-        import(CDN_HASH),
-      ]);
+      const [
+        supabaseModule,
+        hashModule,
+      ] =
+        await Promise.all([
+          import(CDN_SUPABASE),
+          import(CDN_HASH),
+        ]);
 
-      this.hashWasm = hashModule;
+      this.hashWasm =
+        hashModule;
 
-      this.supabase = supabaseModule.createClient(
-        this.config.supabaseUrl,
-        this.config.supabaseKey,
-        {
-          auth: {
-            persistSession: false,
-            autoRefreshToken: false,
-            detectSessionInUrl: false,
-          },
-          realtime: {
-            params: {
-              eventsPerSecond: 20,
+      this.supabase =
+        supabaseModule.createClient(
+          this.config.supabaseUrl,
+          this.config.supabaseKey,
+          {
+            auth: {
+              persistSession:
+                false,
+
+              autoRefreshToken:
+                false,
+
+              detectSessionInUrl:
+                false,
             },
-          },
-        },
-      );
+
+            realtime: {
+              params: {
+                eventsPerSecond:
+                  20,
+              },
+            },
+          }
+        );
 
       this.render();
+
     } catch (error) {
-      console.error("WatchTogether startup error", error);
+      console.error(
+        "WatchTogether startup error",
+        error
+      );
 
       this.renderFatal(
         "We couldn't start WatchTogether. Check the app's Supabase settings and refresh the page."
@@ -149,15 +361,43 @@ class WatchTogetherApp {
       ...this.config,
       ...(config || {}),
     };
+
+    /*
+      Browser URL is always authoritative.
+
+      This prevents stale Streamlit query data
+      from reopening an old room.
+    */
+
+    try {
+      this.config.roomFromUrl =
+        safeRoomCode(
+          new URL(window.location.href)
+            .searchParams
+            .get("room") || ""
+        );
+
+    } catch {
+      this.config.roomFromUrl =
+        "";
+    }
   }
 
   renderLoading(text) {
     this.root.innerHTML = `
       <div class="wt-loading">
-        <div class="wt-logo-mark">▶</div>
+        <div class="wt-logo-mark">
+          ▶
+        </div>
+
         <div>
-          <strong>WatchTogether</strong>
-          <span>${esc(text)}</span>
+          <strong>
+            WatchTogether
+          </strong>
+
+          <span>
+            ${esc(text)}
+          </span>
         </div>
       </div>
     `;
@@ -166,77 +406,193 @@ class WatchTogetherApp {
   renderFatal(text) {
     this.root.innerHTML = `
       <div class="wt-shell">
+
         <div class="wt-stage">
+
           <div class="wt-modal-card wt-center">
-            <div class="wt-file-icon">⚠️</div>
-            <h2>Something went wrong</h2>
-            <p>${esc(text)}</p>
-            <button class="wt-btn primary" id="fatal-reload">
+
+            <div class="wt-file-icon">
+              ⚠️
+            </div>
+
+            <h2>
+              Something went wrong
+            </h2>
+
+            <p>
+              ${esc(text)}
+            </p>
+
+            <button
+              class="wt-btn primary"
+              id="fatal-reload"
+            >
               Try Again
             </button>
+
           </div>
+
         </div>
+
       </div>
     `;
 
     this.root
-      .querySelector("#fatal-reload")
-      ?.addEventListener("click", () => location.reload());
+      .querySelector(
+        "#fatal-reload"
+      )
+      ?.addEventListener(
+        "click",
+        () => location.reload()
+      );
   }
 
   topbar() {
     const conn =
-      this.connectionStatus === "connected"
-        ? `<span class="wt-pill"><i class="wt-dot"></i>Connected</span>`
-        : this.connectionStatus === "reconnecting"
-          ? `<span class="wt-pill"><i class="wt-dot yellow"></i>Reconnecting…</span>`
-          : `<span class="wt-pill"><i class="wt-dot red"></i>Offline</span>`;
+      this.connectionStatus ===
+      "connected"
+        ? `
+          <span class="wt-pill">
+            <i class="wt-dot"></i>
+            Connected
+          </span>
+        `
+        : this.connectionStatus ===
+          "reconnecting"
+          ? `
+            <span class="wt-pill">
+              <i class="wt-dot yellow"></i>
+              Reconnecting…
+            </span>
+          `
+          : `
+            <span class="wt-pill">
+              <i class="wt-dot red"></i>
+              Offline
+            </span>
+          `;
 
-    const room = this.roomCode
-      ? `<span class="wt-pill room-pill">Room&nbsp; <strong>${esc(this.roomCode)}</strong></span>`
-      : "";
+    const room =
+      this.roomCode
+        ? `
+          <span class="wt-pill room-pill">
+            Room&nbsp;
+            <strong>
+              ${esc(this.roomCode)}
+            </strong>
+          </span>
+        `
+        : "";
 
     return `
       <header class="wt-topbar">
+
         <div class="wt-brand">
-          <div class="wt-logo-mark">▶</div>
-          <span>WatchTogether</span>
+
+          <div class="wt-logo-mark">
+            ▶
+          </div>
+
+          <span>
+            WatchTogether
+          </span>
+
         </div>
 
         <div class="wt-top-actions">
+
           ${room}
-          ${this.channel ? conn : ""}
+
+          ${
+            this.channel
+              ? conn
+              : ""
+          }
+
         </div>
+
       </header>
     `;
   }
 
   render() {
-    if (this.destroyed) return;
+    if (
+      this.destroyed
+    ) {
+      return;
+    }
 
-    if (this.phase === "landing") return this.renderLanding();
-    if (this.phase === "create") return this.renderCreate();
-    if (this.phase === "join") return this.renderJoin();
-    if (this.phase === "connecting") return this.renderConnecting();
-    if (this.phase === "lobby") return this.renderLobby();
-    if (this.phase === "movie") return this.renderMovieSelect();
-    if (this.phase === "watch") return this.renderWatch();
+    if (
+      this.phase ===
+      "landing"
+    ) {
+      return this.renderLanding();
+    }
+
+    if (
+      this.phase ===
+      "create"
+    ) {
+      return this.renderCreate();
+    }
+
+    if (
+      this.phase ===
+      "join"
+    ) {
+      return this.renderJoin();
+    }
+
+    if (
+      this.phase ===
+      "connecting"
+    ) {
+      return this.renderConnecting();
+    }
+
+    if (
+      this.phase ===
+      "lobby"
+    ) {
+      return this.renderLobby();
+    }
+
+    if (
+      this.phase ===
+      "movie"
+    ) {
+      return this.renderMovieSelect();
+    }
+
+    if (
+      this.phase ===
+      "watch"
+    ) {
+      return this.renderWatch();
+    }
   }
 
   renderLanding() {
     this.root.innerHTML = `
       <div class="wt-shell">
+
         ${this.topbar()}
 
         <section class="wt-hero">
+
           <div>
+
             <span class="wt-eyebrow">
               🔒 Local movie playback · realtime with friends
             </span>
 
             <h1>
-              Watch Movies Together.<br>
-              <span class="wt-gradient">From Anywhere.</span>
+              Watch Movies Together.
+              <br>
+
+              <span class="wt-gradient">
+                From Anywhere.
+              </span>
             </h1>
 
             <p class="wt-hero-copy">
@@ -246,101 +602,205 @@ class WatchTogetherApp {
             </p>
 
             <div class="wt-actions">
-              <button class="wt-btn primary" id="create-room">
+
+              <button
+                class="wt-btn primary"
+                id="create-room"
+              >
                 ＋ Create Watch Room
               </button>
 
-              <button class="wt-btn secondary" id="join-room">
+              <button
+                class="wt-btn secondary"
+                id="join-room"
+              >
                 Join Watch Room
               </button>
+
             </div>
 
             <div class="wt-privacy">
+
               🛡️
+
               <span>
-                No movie upload. We only synchronize playback,
+                No movie upload.
+                We only synchronize playback,
                 chat, camera and microphone.
               </span>
+
             </div>
+
           </div>
 
-          <div class="wt-hero-card" aria-hidden="true">
+          <div
+            class="wt-hero-card"
+            aria-hidden="true"
+          >
+
             <div class="wt-fake-player">
-              <div class="wt-play-orb">▶</div>
+
+              <div class="wt-play-orb">
+                ▶
+              </div>
+
             </div>
 
             <div class="wt-mini-row">
-              <div class="wt-mini-face">👑 You</div>
-              <div class="wt-mini-face">📹 Friend</div>
-              <div class="wt-mini-face">🎤 Friend</div>
+
+              <div class="wt-mini-face">
+                👑 You
+              </div>
+
+              <div class="wt-mini-face">
+                📹 Friend
+              </div>
+
+              <div class="wt-mini-face">
+                🎤 Friend
+              </div>
+
             </div>
+
           </div>
+
         </section>
 
         <section class="wt-features">
+
           <div class="wt-feature">
-            <div class="icon">🎬</div>
-            <strong>Local Playback</strong>
-            <span>Your movie stays on your device.</span>
+            <div class="icon">
+              🎬
+            </div>
+
+            <strong>
+              Local Playback
+            </strong>
+
+            <span>
+              Your movie stays on your device.
+            </span>
           </div>
 
           <div class="wt-feature">
-            <div class="icon">⚡</div>
-            <strong>Smart Sync</strong>
-            <span>Play, pause, seek and drift correction.</span>
+            <div class="icon">
+              ⚡
+            </div>
+
+            <strong>
+              Smart Sync
+            </strong>
+
+            <span>
+              Play, pause, seek and drift correction.
+            </span>
           </div>
 
           <div class="wt-feature">
-            <div class="icon">📹</div>
-            <strong>See Your Friends</strong>
-            <span>Peer-to-peer camera and microphone.</span>
+            <div class="icon">
+              📹
+            </div>
+
+            <strong>
+              See Your Friends
+            </strong>
+
+            <span>
+              Peer-to-peer camera and microphone.
+            </span>
           </div>
 
           <div class="wt-feature">
-            <div class="icon">💬</div>
-            <strong>Live Chat</strong>
-            <span>Talk without leaving the movie.</span>
+            <div class="icon">
+              💬
+            </div>
+
+            <strong>
+              Live Chat
+            </strong>
+
+            <span>
+              Talk without leaving the movie.
+            </span>
           </div>
 
           <div class="wt-feature">
-            <div class="icon">🔒</div>
-            <strong>Private Movie</strong>
-            <span>Movie bytes never go to Streamlit or Supabase.</span>
+            <div class="icon">
+              🔒
+            </div>
+
+            <strong>
+              Private Movie
+            </strong>
+
+            <span>
+              Movie bytes never go to Streamlit or Supabase.
+            </span>
           </div>
+
         </section>
+
       </div>
     `;
 
     this.root
-      .querySelector("#create-room")
-      ?.addEventListener("click", () => {
-        this.phase = "create";
-        this.render();
-      });
+      .querySelector(
+        "#create-room"
+      )
+      ?.addEventListener(
+        "click",
+        () => {
+          this.phase =
+            "create";
+
+          this.render();
+        }
+      );
 
     this.root
-      .querySelector("#join-room")
-      ?.addEventListener("click", () => {
-        this.phase = "join";
-        this.render();
-      });
+      .querySelector(
+        "#join-room"
+      )
+      ?.addEventListener(
+        "click",
+        () => {
+          this.phase =
+            "join";
+
+          this.render();
+        }
+      );
   }
 
   renderCreate() {
     this.root.innerHTML = `
       <div class="wt-shell">
+
         ${this.topbar()}
 
         <div class="wt-stage">
-          <form class="wt-modal-card" id="create-form">
-            <h2>Create Watch Room</h2>
+
+          <form
+            class="wt-modal-card"
+            id="create-form"
+          >
+
+            <h2>
+              Create Watch Room
+            </h2>
 
             <p>
-              Start a private room and invite up to 9 friends.
+              Start a private room
+              and invite up to 9 friends.
             </p>
 
             <div class="wt-form-row">
-              <label for="create-name">Your name</label>
+
+              <label
+                for="create-name"
+              >
+                Your name
+              </label>
 
               <input
                 class="wt-input"
@@ -350,9 +810,11 @@ class WatchTogetherApp {
                 placeholder="e.g. Rahul"
                 autocomplete="name"
               >
+
             </div>
 
             <div class="wt-modal-actions">
+
               <button
                 type="button"
                 class="wt-btn secondary"
@@ -367,52 +829,89 @@ class WatchTogetherApp {
               >
                 Create Room
               </button>
+
             </div>
+
           </form>
+
         </div>
+
       </div>
     `;
 
     this.root
-      .querySelector("#back")
-      ?.addEventListener("click", () => {
-        this.phase = "landing";
-        this.render();
-      });
+      .querySelector(
+        "#back"
+      )
+      ?.addEventListener(
+        "click",
+        () => {
+          this.phase =
+            "landing";
+
+          this.render();
+        }
+      );
 
     this.root
-      .querySelector("#create-form")
-      ?.addEventListener("submit", async (e) => {
-        e.preventDefault();
+      .querySelector(
+        "#create-form"
+      )
+      ?.addEventListener(
+        "submit",
+        async (e) => {
+          e.preventDefault();
 
-        const name =
-          this.root.querySelector("#create-name")?.value.trim();
+          const name =
+            this.root
+              .querySelector(
+                "#create-name"
+              )
+              ?.value
+              .trim();
 
-        if (!name) return;
+          if (!name) {
+            return;
+          }
 
-        await this.joinRoom(
-          randomRoomCode(),
-          name,
-          true
-        );
-      });
+          await this.joinRoom(
+            randomRoomCode(),
+            name,
+            true
+          );
+        }
+      );
   }
 
   renderJoin() {
     this.root.innerHTML = `
       <div class="wt-shell">
+
         ${this.topbar()}
 
         <div class="wt-stage">
-          <form class="wt-modal-card" id="join-form">
-            <h2>Join Watch Room</h2>
+
+          <form
+            class="wt-modal-card"
+            id="join-form"
+          >
+
+            <h2>
+              Join Watch Room
+            </h2>
 
             <p>
-              Enter the room code your friend shared with you.
+              Enter the room code
+              your friend shared with you.
             </p>
 
             <div class="wt-form-row">
-              <label for="join-code">Room code</label>
+
+              <label
+                for="join-code"
+              >
+                Room code
+              </label>
 
               <input
                 class="wt-input code"
@@ -423,10 +922,16 @@ class WatchTogetherApp {
                 placeholder="WATCH-8F42AB"
                 autocomplete="off"
               >
+
             </div>
 
             <div class="wt-form-row">
-              <label for="join-name">Your name</label>
+
+              <label
+                for="join-name"
+              >
+                Your name
+              </label>
 
               <input
                 class="wt-input"
@@ -436,9 +941,11 @@ class WatchTogetherApp {
                 placeholder="Your name"
                 autocomplete="name"
               >
+
             </div>
 
             <div class="wt-modal-actions">
+
               <button
                 type="button"
                 class="wt-btn secondary"
@@ -453,51 +960,93 @@ class WatchTogetherApp {
               >
                 Join Room
               </button>
+
             </div>
+
           </form>
+
         </div>
+
       </div>
     `;
 
     this.root
-      .querySelector("#back")
-      ?.addEventListener("click", () => {
-        this.phase = "landing";
-        this.roomCode = "";
-        this.updateUrl("");
-        this.render();
-      });
+      .querySelector(
+        "#back"
+      )
+      ?.addEventListener(
+        "click",
+        () => {
+          this.phase =
+            "landing";
+
+          this.roomCode =
+            "";
+
+          this.updateUrl(
+            ""
+          );
+
+          this.render();
+        }
+      );
 
     this.root
-      .querySelector("#join-form")
-      ?.addEventListener("submit", async (e) => {
-        e.preventDefault();
+      .querySelector(
+        "#join-form"
+      )
+      ?.addEventListener(
+        "submit",
+        async (e) => {
+          e.preventDefault();
 
-        const code = safeRoomCode(
-          this.root.querySelector("#join-code")?.value || ""
-        );
+          const code =
+            safeRoomCode(
+              this.root
+                .querySelector(
+                  "#join-code"
+                )
+                ?.value ||
+                ""
+            );
 
-        const name =
-          this.root.querySelector("#join-name")?.value.trim();
+          const name =
+            this.root
+              .querySelector(
+                "#join-name"
+              )
+              ?.value
+              .trim();
 
-        if (!code || !name) return;
+          if (
+            !code ||
+            !name
+          ) {
+            return;
+          }
 
-        await this.joinRoom(
-          code,
-          name,
-          false
-        );
-      });
+          await this.joinRoom(
+            code,
+            name,
+            false
+          );
+        }
+      );
   }
 
   renderConnecting() {
     this.root.innerHTML = `
       <div class="wt-shell">
+
         ${this.topbar()}
 
         <div class="wt-stage">
+
           <div class="wt-modal-card wt-center">
-            <div class="wt-file-icon">✨</div>
+
+            <div class="wt-file-icon">
+              ✨
+            </div>
 
             <h2>
               ${
@@ -508,219 +1057,350 @@ class WatchTogetherApp {
             </h2>
 
             <p>
-              Connecting securely to the watch party.
+              Connecting securely
+              to the watch party.
             </p>
+
           </div>
+
         </div>
+
       </div>
     `;
   }
 
-  async joinRoom(code, name, creating) {
-    await this.leaveRoom(false);
+  async joinRoom(
+    code,
+    name,
+    creating
+  ) {
+    await this.leaveRoom(
+      false
+    );
 
-    this.roomCode = safeRoomCode(code);
-    this.name = String(name).slice(0, 40);
-    this.creating = creating;
-    this.joinedAt = Date.now();
+    /*
+      We are intentionally entering a new room,
+      so reconnect protection can be enabled again.
+    */
 
-    this.phase = "connecting";
-    this.connectionStatus = "reconnecting";
+    this.intentionalDisconnect =
+      false;
+
+    this.roomCode =
+      safeRoomCode(
+        code
+      );
+
+    this.name =
+      String(name).slice(
+        0,
+        40
+      );
+
+    this.creating =
+      creating;
+
+    this.joinedAt =
+      Date.now();
+
+    this.phase =
+      "connecting";
+
+    this.connectionStatus =
+      "reconnecting";
 
     this.render();
 
-    const channel = this.supabase.channel(
-      `watchtogether:${this.roomCode}`,
-      {
-        config: {
-          presence: {
-            key: this.peerId,
-          },
-          broadcast: {
-            ack: true,
-            self: false,
-          },
-        },
-      }
-    );
+    const channel =
+      this.supabase.channel(
+        `watchtogether:${this.roomCode}`,
+        {
+          config: {
+            presence: {
+              key:
+                this.peerId,
+            },
 
-    this.channel = channel;
+            broadcast: {
+              ack:
+                true,
 
-    const onBroadcast = (event, handler) =>
-      channel.on(
-        "broadcast",
-        { event },
-        (message) =>
-          handler(message?.payload ?? message)
+              self:
+                false,
+            },
+          },
+        }
       );
+
+    this.channel =
+      channel;
+
+    const onBroadcast =
+      (
+        event,
+        handler
+      ) =>
+        channel.on(
+          "broadcast",
+          {
+            event,
+          },
+          (message) =>
+            handler(
+              message?.payload ??
+              message
+            )
+        );
 
     onBroadcast(
       "chat",
-      (p) => this.onChat(p)
+      (p) =>
+        this.onChat(p)
     );
 
     onBroadcast(
       "playback",
-      (p) => this.onPlayback(p)
+      (p) =>
+        this.onPlayback(p)
     );
 
     onBroadcast(
       "state-request",
-      (p) => this.onStateRequest(p)
+      (p) =>
+        this.onStateRequest(p)
     );
 
     onBroadcast(
       "clock-ping",
-      (p) => this.onClockPing(p)
+      (p) =>
+        this.onClockPing(p)
     );
 
     onBroadcast(
       "clock-pong",
-      (p) => this.onClockPong(p)
+      (p) =>
+        this.onClockPong(p)
     );
 
     onBroadcast(
       "signal",
-      (p) => this.onSignal(p)
+      (p) =>
+        this.onSignal(p)
     );
 
     onBroadcast(
       "renegotiate",
-      (p) => this.onRenegotiate(p)
+      (p) =>
+        this.onRenegotiate(p)
     );
 
     onBroadcast(
       "kick",
-      (p) => this.onKick(p)
+      (p) =>
+        this.onKick(p)
     );
 
     onBroadcast(
       "room-control",
-      (p) => this.onRoomControl(p)
+      (p) =>
+        this.onRoomControl(p)
     );
 
     onBroadcast(
       "moderation-mute",
-      (p) => this.onModerationMute(p)
+      (p) =>
+        this.onModerationMute(p)
     );
 
     onBroadcast(
       "end-room",
-      (p) => this.onEndRoom(p)
+      (p) =>
+        this.onEndRoom(p)
     );
 
     channel
       .on(
         "presence",
-        { event: "sync" },
-        () => this.onPresenceSync()
+        {
+          event:
+            "sync",
+        },
+        () =>
+          this.onPresenceSync()
       )
-      .subscribe(async (status) => {
-        if (this.channel !== channel) return;
+      .subscribe(
+        async (status) => {
+          if (
+            this.channel !==
+            channel
+          ) {
+            return;
+          }
 
-        if (status === "SUBSCRIBED") {
-          this.connected = true;
-          this.connectionStatus = "connected";
+          if (
+            status ===
+            "SUBSCRIBED"
+          ) {
+            this.connected =
+              true;
 
-          await this.trackPresence();
+            this.connectionStatus =
+              "connected";
 
-          if (creating) {
-            this.participants.set(
-              this.peerId,
+            await this.trackPresence();
+
+            if (
+              creating
+            ) {
+              this.participants.set(
+                this.peerId,
+                {
+                  peerId:
+                    this.peerId,
+
+                  name:
+                    this.name,
+
+                  joinedAt:
+                    this.joinedAt,
+
+                  creator:
+                    true,
+
+                  movieHash:
+                    this.fileHash ||
+                    "",
+
+                  movieName:
+                    this.file?.name ||
+                    "",
+
+                  movieSize:
+                    this.file?.size ||
+                    0,
+
+                  movieDuration:
+                    this.fileDuration ||
+                    0,
+
+                  mic:
+                    this.micEnabled,
+
+                  cam:
+                    this.camEnabled,
+                }
+              );
+
+              this.hostId =
+                this.peerId;
+
+              this.isHost =
+                true;
+            }
+
+            this.updateUrl(
+              this.roomCode
+            );
+
+            this.phase =
+              "lobby";
+
+            this.render();
+
+            if (
+              !creating
+            ) {
+              await sleep(
+                2800
+              );
+
+              if (
+                this.channel !==
+                channel
+              ) {
+                return;
+              }
+
+              if (
+                this.participants.size <=
+                1
+              ) {
+                this.toast(
+                  "Room not found. Ask the host for a fresh invite link.",
+                  "bad"
+                );
+
+                await this.leaveRoom(
+                  false
+                );
+
+                this.phase =
+                  "join";
+
+                this.connectionStatus =
+                  "offline";
+
+                this.render();
+
+                return;
+              }
+            }
+
+            this.send(
+              "state-request",
               {
-                peerId: this.peerId,
-                name: this.name,
-                joinedAt: this.joinedAt,
-                creator: true,
-
-                movieHash:
-                  this.fileHash || "",
-
-                movieName:
-                  this.file?.name || "",
-
-                movieSize:
-                  this.file?.size || 0,
-
-                movieDuration:
-                  this.fileDuration || 0,
-
-                mic:
-                  this.micEnabled,
-
-                cam:
-                  this.camEnabled,
+                from:
+                  this.peerId,
               }
             );
 
-            this.hostId = this.peerId;
-            this.isHost = true;
+            this.syncClock();
+
+          } else if (
+            [
+              "CHANNEL_ERROR",
+              "TIMED_OUT",
+            ].includes(
+              status
+            )
+          ) {
+            this.connectionStatus =
+              "reconnecting";
+
+            this.updateTopStatus();
+
+          } else if (
+            status ===
+              "CLOSED" &&
+            !this.destroyed &&
+            !this.intentionalDisconnect &&
+            this.channel ===
+              channel
+          ) {
+            /*
+              Only reconnect when the channel unexpectedly
+              disconnects.
+
+              Do NOT reconnect after Leave / End Room.
+            */
+
+            this.connectionStatus =
+              "reconnecting";
+
+            this.updateTopStatus();
+
+            this.scheduleReconnect();
           }
-
-          this.updateUrl(this.roomCode);
-
-          this.phase = "lobby";
-          this.render();
-
-          if (!creating) {
-            await sleep(2800);
-
-            if (this.channel !== channel) return;
-
-            if (this.participants.size <= 1) {
-              this.toast(
-                "Room not found. Ask the host for a fresh invite link.",
-                "bad"
-              );
-
-              await this.leaveRoom(false);
-
-              this.phase = "join";
-              this.connectionStatus = "offline";
-
-              this.render();
-
-              return;
-            }
-          }
-
-          this.send(
-            "state-request",
-            {
-              from: this.peerId,
-            }
-          );
-
-          this.syncClock();
-
-        } else if (
-          [
-            "CHANNEL_ERROR",
-            "TIMED_OUT",
-          ].includes(status)
-        ) {
-          this.connectionStatus =
-            "reconnecting";
-
-          this.updateTopStatus();
-
-        } else if (
-          status === "CLOSED" &&
-          !this.destroyed &&
-          this.channel === channel
-        ) {
-          this.connectionStatus =
-            "reconnecting";
-
-          this.updateTopStatus();
-
-          this.scheduleReconnect();
         }
-      });
+      );
   }
 
   async trackPresence() {
-    if (!this.channel) return;
+    if (
+      !this.channel
+    ) {
+      return;
+    }
 
     try {
       await this.channel.track({
@@ -734,25 +1414,35 @@ class WatchTogetherApp {
           this.joinedAt,
 
         creator:
-          Boolean(this.creating),
+          Boolean(
+            this.creating
+          ),
 
         movieHash:
-          this.fileHash || "",
+          this.fileHash ||
+          "",
 
         movieName:
-          this.file?.name || "",
+          this.file?.name ||
+          "",
 
         movieSize:
-          this.file?.size || 0,
+          this.file?.size ||
+          0,
 
         movieDuration:
-          this.fileDuration || 0,
+          this.fileDuration ||
+          0,
 
         mic:
-          Boolean(this.micEnabled),
+          Boolean(
+            this.micEnabled
+          ),
 
         cam:
-          Boolean(this.camEnabled),
+          Boolean(
+            this.camEnabled
+          ),
       });
 
     } catch (error) {
@@ -764,7 +1454,11 @@ class WatchTogetherApp {
   }
 
   onPresenceSync() {
-    if (!this.channel) return;
+    if (
+      !this.channel
+    ) {
+      return;
+    }
 
     const raw =
       this.channel.presenceState();
@@ -773,17 +1467,26 @@ class WatchTogetherApp {
       new Map();
 
     for (
-      const [key, values]
-      of Object.entries(raw || {})
+      const [
+        key,
+        values,
+      ] of
+      Object.entries(
+        raw || {}
+      )
     ) {
       for (
         const presence
-        of values || []
+        of
+        values || []
       ) {
         const id =
-          presence.peerId || key;
+          presence.peerId ||
+          key;
 
-        if (!id) continue;
+        if (!id) {
+          continue;
+        }
 
         const existing =
           next.get(id);
@@ -791,11 +1494,13 @@ class WatchTogetherApp {
         if (
           !existing ||
           Number(
-            presence.joinedAt || 0
+            presence.joinedAt ||
+            0
           ) >=
-          Number(
-            existing.joinedAt || 0
-          )
+            Number(
+              existing.joinedAt ||
+              0
+            )
         ) {
           next.set(
             id,
@@ -807,7 +1512,10 @@ class WatchTogetherApp {
                 String(
                   presence.name ||
                   "Guest"
-                ).slice(0, 40),
+                ).slice(
+                  0,
+                  40
+                ),
 
               joinedAt:
                 Number(
@@ -859,29 +1567,42 @@ class WatchTogetherApp {
       next;
 
     if (
-      next.size > 10 &&
-      next.has(this.peerId)
+      next.size >
+        10 &&
+      next.has(
+        this.peerId
+      )
     ) {
       this.toast(
         "This room already has 10 people.",
         "bad"
       );
 
-      this.leaveRoom(true);
+      this.leaveRoom(
+        true
+      );
 
       return;
     }
 
     const sorted =
-      [...next.values()]
-        .sort(
-          (a, b) =>
-            Number(b.creator) -
-              Number(a.creator) ||
-            a.peerId.localeCompare(
-              b.peerId
-            )
-        );
+      [
+        ...next.values(),
+      ].sort(
+        (
+          a,
+          b
+        ) =>
+          Number(
+            b.creator
+          ) -
+            Number(
+              a.creator
+            ) ||
+          a.peerId.localeCompare(
+            b.peerId
+          )
+      );
 
     const oldHost =
       this.hostId;
@@ -901,11 +1622,15 @@ class WatchTogetherApp {
 
     for (
       const id
-      of currentIds
+      of
+      currentIds
     ) {
       if (
-        id === this.peerId ||
-        this.previousParticipantIds.has(id)
+        id ===
+          this.peerId ||
+        this.previousParticipantIds.has(
+          id
+        )
       ) {
         continue;
       }
@@ -916,12 +1641,15 @@ class WatchTogetherApp {
         (
           next.get(id)?.joinedAt ||
           0
-        ) >= this.lockedAt
+        ) >=
+          this.lockedAt
       ) {
         this.send(
           "kick",
           {
-            to: id,
+            to:
+              id,
+
             from:
               this.peerId,
 
@@ -940,12 +1668,17 @@ class WatchTogetherApp {
 
     for (
       const id
-      of this.previousParticipantIds
+      of
+      this.previousParticipantIds
     ) {
       if (
-        !currentIds.has(id)
+        !currentIds.has(
+          id
+        )
       ) {
-        this.closePeer(id);
+        this.closePeer(
+          id
+        );
       }
     }
 
@@ -957,12 +1690,21 @@ class WatchTogetherApp {
         this.hostId &&
       this.hostId
     ) {
-      this.clockSamples = [];
-      this.clockOffset = 0;
-      this.clockRtt = null;
+      this.clockSamples =
+        [];
 
-      if (this.isHost) {
-        if (oldHost) {
+      this.clockOffset =
+        0;
+
+      this.clockRtt =
+        null;
+
+      if (
+        this.isHost
+      ) {
+        if (
+          oldHost
+        ) {
           this.toast(
             "You are now the host 👑",
             "good"
@@ -974,10 +1716,14 @@ class WatchTogetherApp {
         );
 
       } else {
-        if (oldHost) {
+        if (
+          oldHost
+        ) {
           this.toast(
             `${
-              next.get(this.hostId)?.name ||
+              next.get(
+                this.hostId
+              )?.name ||
               "A participant"
             } is now the host.`,
             "good"
@@ -999,29 +1745,38 @@ class WatchTogetherApp {
     this.verifyAgainstHost();
 
     if (
-      this.phase === "lobby"
+      this.phase ===
+      "lobby"
     ) {
       this.updateLobbyParticipants();
     }
 
     if (
-      this.phase === "watch"
+      this.phase ===
+      "watch"
     ) {
       this.updatePeopleUI();
+
       this.updateWatchControlsRole();
+
       this.updateTopStatus();
     }
   }
 
-  ensurePeerHandshake(peerId) {
+  ensurePeerHandshake(
+    peerId
+  ) {
     if (
       !peerId ||
-      peerId === this.peerId
+      peerId ===
+        this.peerId
     ) {
       return;
     }
 
-    this.ensurePC(peerId);
+    this.ensurePC(
+      peerId
+    );
 
     if (
       this.peerId.localeCompare(
@@ -1030,23 +1785,13 @@ class WatchTogetherApp {
     ) {
       setTimeout(
         () =>
-          this.makeOffer(peerId),
+          this.makeOffer(
+            peerId
+          ),
 
         200 +
           Math.random() *
             300
-      );
-
-    } else {
-      this.send(
-        "renegotiate",
-        {
-          from:
-            this.peerId,
-
-          to:
-            peerId,
-        }
       );
     }
   }
@@ -1059,10 +1804,13 @@ class WatchTogetherApp {
 
     this.root.innerHTML = `
       <div class="wt-shell">
+
         ${this.topbar()}
 
         <div class="wt-stage">
+
           <div class="wt-modal-card wt-center">
+
             <div class="wt-file-icon">
               ${
                 this.isHost
@@ -1091,6 +1839,7 @@ class WatchTogetherApp {
               class="wt-actions"
               style="justify-content:center"
             >
+
               <button
                 class="wt-btn secondary small"
                 id="copy-invite"
@@ -1104,6 +1853,7 @@ class WatchTogetherApp {
               >
                 ↗ Share
               </button>
+
             </div>
 
             <div
@@ -1112,6 +1862,7 @@ class WatchTogetherApp {
             ></div>
 
             <div class="wt-modal-actions">
+
               <button
                 class="wt-btn danger"
                 type="button"
@@ -1127,44 +1878,62 @@ class WatchTogetherApp {
               >
                 🎬 Choose Movie
               </button>
+
             </div>
+
           </div>
+
         </div>
+
       </div>
     `;
 
     this.updateLobbyParticipants();
 
     this.root
-      .querySelector("#copy-invite")
+      .querySelector(
+        "#copy-invite"
+      )
       ?.addEventListener(
         "click",
-        () => this.copyInvite()
+        () =>
+          this.copyInvite()
       );
 
     this.root
-      .querySelector("#share-invite")
+      .querySelector(
+        "#share-invite"
+      )
       ?.addEventListener(
         "click",
-        () => this.shareInvite()
+        () =>
+          this.shareInvite()
       );
 
     this.root
-      .querySelector("#choose-movie")
+      .querySelector(
+        "#choose-movie"
+      )
       ?.addEventListener(
         "click",
         () => {
-          this.phase = "movie";
+          this.phase =
+            "movie";
+
           this.render();
         }
       );
 
     this.root
-      .querySelector("#leave-room")
+      .querySelector(
+        "#leave-room"
+      )
       ?.addEventListener(
         "click",
         () =>
-          this.leaveRoom(true)
+          this.leaveRoom(
+            true
+          )
       );
   }
 
@@ -1174,45 +1943,65 @@ class WatchTogetherApp {
         "#lobby-users"
       );
 
-    if (!box) return;
+    if (!box) {
+      return;
+    }
 
     const sorted =
-      [...this.participants.values()]
-        .sort(
-          (a, b) =>
-            a.joinedAt -
-            b.joinedAt
-        );
+      [
+        ...this.participants.values(),
+      ].sort(
+        (
+          a,
+          b
+        ) =>
+          a.joinedAt -
+          b.joinedAt
+      );
 
     box.innerHTML =
       sorted
         .map(
           (p) => `
             <div class="wt-user-line">
+
               <div class="wt-user-main">
+
                 <div class="wt-avatar">
                   👤
                 </div>
 
                 <span>
                   ${esc(
-                    p.peerId === this.peerId
+                    p.peerId ===
+                      this.peerId
                       ? `${p.name} (You)`
                       : p.name
                   )}
                 </span>
+
               </div>
 
               ${
-                p.peerId === this.hostId
-                  ? `<span class="wt-badge">👑 HOST</span>`
+                p.peerId ===
+                this.hostId
+                  ? `
+                    <span class="wt-badge">
+                      👑 HOST
+                    </span>
+                  `
                   : ""
               }
+
             </div>
           `
         )
         .join("") ||
-      `<div class="wt-muted">Waiting for others to join…</div>`;
+      `
+        <div class="wt-muted">
+          Waiting for others to join…
+        </div>
+      `;
   }
 
   inviteUrl() {
@@ -1252,7 +2041,9 @@ class WatchTogetherApp {
     const url =
       this.inviteUrl();
 
-    if (navigator.share) {
+    if (
+      navigator.share
+    ) {
       try {
         await navigator.share({
           title:
@@ -1265,6 +2056,7 @@ class WatchTogetherApp {
         });
 
         return;
+
       } catch {}
     }
 
@@ -1279,31 +2071,54 @@ class WatchTogetherApp {
 
     const hostText =
       host?.movieHash
-        ? `Host selected: ${esc(host.movieName || "movie")}`
+        ? `Host selected: ${esc(
+            host.movieName ||
+            "movie"
+          )}`
         : "Waiting for the host to select a movie";
 
     const status =
       this.hashing
         ? `
           <div class="wt-status-box">
+
             Checking movie…
+
             <strong id="hash-percent">
-              ${Math.round(this.hashProgress)}%
+              ${Math.round(
+                this.hashProgress
+              )}%
             </strong>
 
             <div class="wt-progress">
+
               <i
                 id="hash-progress"
                 style="width:${this.hashProgress}%"
               ></i>
+
             </div>
+
           </div>
         `
         : this.fileHash
           ? `
-            <div class="wt-status-box ${this.verified ? "good" : "bad"}">
-              ${this.verified ? "✓" : "⚠"}
-              ${esc(this.verifyMessage)}
+            <div class="wt-status-box ${
+              this.verified
+                ? "good"
+                : "bad"
+            }">
+
+              ${
+                this.verified
+                  ? "✓"
+                  : "⚠"
+              }
+
+              ${esc(
+                this.verifyMessage
+              )}
+
             </div>
           `
           : `
@@ -1314,10 +2129,13 @@ class WatchTogetherApp {
 
     this.root.innerHTML = `
       <div class="wt-shell">
+
         ${this.topbar()}
 
         <div class="wt-stage">
+
           <div class="wt-modal-card">
+
             <h2>
               Choose Your Movie
             </h2>
@@ -1331,7 +2149,9 @@ class WatchTogetherApp {
               class="wt-file-drop"
               for="movie-file"
             >
+
               <div>
+
                 <div class="wt-file-icon">
                   🎬
                 </div>
@@ -1339,7 +2159,9 @@ class WatchTogetherApp {
                 <h3>
                   ${
                     this.file
-                      ? esc(this.file.name)
+                      ? esc(
+                          this.file.name
+                        )
                       : "Select your movie file"
                   }
                 </h3>
@@ -1347,7 +2169,11 @@ class WatchTogetherApp {
                 <p class="wt-muted">
                   ${
                     this.file
-                      ? `${formatBytes(this.file.size)} · ${formatTime(this.fileDuration)}`
+                      ? `${formatBytes(
+                          this.file.size
+                        )} · ${formatTime(
+                          this.fileDuration
+                        )}`
                       : "MP4, WebM and other formats supported by your browser"
                   }
                 </p>
@@ -1355,7 +2181,9 @@ class WatchTogetherApp {
                 <span class="wt-btn secondary small">
                   Choose Movie
                 </span>
+
               </div>
+
             </label>
 
             <input
@@ -1368,6 +2196,7 @@ class WatchTogetherApp {
             ${status}
 
             <div class="wt-modal-actions">
+
               <button
                 class="wt-btn secondary"
                 type="button"
@@ -1380,18 +2209,28 @@ class WatchTogetherApp {
                 class="wt-btn primary"
                 type="button"
                 id="enter-watch"
-                ${this.verified ? "" : "disabled"}
+                ${
+                  this.verified
+                    ? ""
+                    : "disabled"
+                }
               >
                 Enter Watch Room
               </button>
+
             </div>
+
           </div>
+
         </div>
+
       </div>
     `;
 
     this.root
-      .querySelector("#movie-back")
+      .querySelector(
+        "#movie-back"
+      )
       ?.addEventListener(
         "click",
         () => {
@@ -1403,7 +2242,9 @@ class WatchTogetherApp {
       );
 
     this.root
-      .querySelector("#movie-file")
+      .querySelector(
+        "#movie-file"
+      )
       ?.addEventListener(
         "change",
         (e) =>
@@ -1413,13 +2254,20 @@ class WatchTogetherApp {
       );
 
     this.root
-      .querySelector("#enter-watch")
+      .querySelector(
+        "#enter-watch"
+      )
       ?.addEventListener(
         "click",
         () => {
-          if (!this.verified) return;
+          if (
+            !this.verified
+          ) {
+            return;
+          }
 
-          this.phase = "watch";
+          this.phase =
+            "watch";
 
           this.render();
         }
@@ -1427,29 +2275,54 @@ class WatchTogetherApp {
   }
 
   async selectMovie(file) {
-    if (!file) return;
+    if (!file) {
+      return;
+    }
 
-    this.file = file;
+    this.file =
+      file;
 
-    if (this.fileUrl) {
+    if (
+      this.fileUrl
+    ) {
       URL.revokeObjectURL(
         this.fileUrl
       );
     }
+
+    /*
+      CRITICAL PRIVACY REQUIREMENT
+
+      Movie stays local.
+
+      No FormData.
+      No upload.
+      No Supabase storage.
+      No FastAPI endpoint.
+    */
 
     this.fileUrl =
       URL.createObjectURL(
         file
       );
 
-    this.fileHash = "";
-    this.fileDuration = 0;
-    this.verified = false;
+    this.fileHash =
+      "";
+
+    this.fileDuration =
+      0;
+
+    this.verified =
+      false;
+
     this.verifyMessage =
       "Checking file…";
 
-    this.hashing = true;
-    this.hashProgress = 0;
+    this.hashing =
+      true;
+
+    this.hashProgress =
+      0;
 
     this.renderMovieSelect();
 
@@ -1519,10 +2392,14 @@ class WatchTogetherApp {
 
         if (label) {
           label.textContent =
-            `${Math.round(this.hashProgress)}%`;
+            `${Math.round(
+              this.hashProgress
+            )}%`;
         }
 
-        await sleep(0);
+        await sleep(
+          0
+        );
       }
 
       this.fileHash =
@@ -1530,8 +2407,11 @@ class WatchTogetherApp {
           "hex"
         );
 
-      this.hashing = false;
-      this.hashProgress = 100;
+      this.hashing =
+        false;
+
+      this.hashProgress =
+        100;
 
       await this.trackPresence();
 
@@ -1545,9 +2425,14 @@ class WatchTogetherApp {
         error
       );
 
-      this.hashing = false;
-      this.fileHash = "";
-      this.verified = false;
+      this.hashing =
+        false;
+
+      this.fileHash =
+        "";
+
+      this.verified =
+        false;
 
       this.verifyMessage =
         "We couldn't check this file. Try selecting it again.";
@@ -1575,7 +2460,8 @@ class WatchTogetherApp {
             const duration =
               Number(
                 probe.duration
-              ) || 0;
+              ) ||
+              0;
 
             probe.removeAttribute(
               "src"
@@ -1587,16 +2473,26 @@ class WatchTogetherApp {
           };
 
         probe.onerror =
-          () => resolve(0);
+          () =>
+            resolve(
+              0
+            );
       }
     );
   }
 
   verifyAgainstHost() {
-    if (!this.fileHash) return;
+    if (
+      !this.fileHash
+    ) {
+      return;
+    }
 
-    if (this.isHost) {
-      this.verified = true;
+    if (
+      this.isHost
+    ) {
+      this.verified =
+        true;
 
       this.verifyMessage =
         "File verified. Friends will compare their fingerprint with yours.";
@@ -1609,8 +2505,11 @@ class WatchTogetherApp {
         this.hostId
       );
 
-    if (!host?.movieHash) {
-      this.verified = false;
+    if (
+      !host?.movieHash
+    ) {
+      this.verified =
+        false;
 
       this.verifyMessage =
         "File verified locally. Waiting for the host to select their movie.";
@@ -1645,14 +2544,16 @@ class WatchTogetherApp {
           : "The fingerprint matches, but file metadata differs. Please use the exact same file.";
 
     } else {
-      this.verified = false;
+      this.verified =
+        false;
 
       this.verifyMessage =
         "Different movie file. You and the host must select the exact same movie.";
     }
 
     if (
-      this.phase === "movie" &&
+      this.phase ===
+        "movie" &&
       !this.hashing
     ) {
       const status =
@@ -1662,10 +2563,18 @@ class WatchTogetherApp {
 
       if (status) {
         status.className =
-          `wt-status-box ${this.verified ? "good" : "bad"}`;
+          `wt-status-box ${
+            this.verified
+              ? "good"
+              : "bad"
+          }`;
 
         status.textContent =
-          `${this.verified ? "✓" : "⚠"} ${this.verifyMessage}`;
+          `${
+            this.verified
+              ? "✓"
+              : "⚠"
+          } ${this.verifyMessage}`;
       }
 
       const enter =
@@ -1683,11 +2592,15 @@ class WatchTogetherApp {
   renderWatch() {
     this.root.innerHTML = `
       <div class="wt-shell wt-watch">
+
         ${this.topbar()}
 
         <div class="wt-watch-grid">
+
           <main class="wt-player-card">
+
             <div class="wt-video-wrap">
+
               <video
                 class="wt-video"
                 id="movie-video"
@@ -1699,33 +2612,46 @@ class WatchTogetherApp {
                 class="wt-video-empty"
                 id="video-empty"
               >
+
                 <div>
+
                   <span class="big">
                     🎬
                   </span>
 
                   Loading your local movie…
+
                 </div>
+
               </div>
 
               <div class="wt-player-overlay">
+
                 <span class="wt-local-note">
                   🔒 Playing locally · only playback is synchronized
                 </span>
+
               </div>
+
             </div>
 
             <div class="wt-controls">
+
               <button
                 class="wt-icon-btn"
                 id="play-btn"
                 aria-label="Play or pause"
-                ${this.isHost ? "" : "disabled"}
+                ${
+                  this.isHost
+                    ? ""
+                    : "disabled"
+                }
               >
                 ▶
               </button>
 
               <div class="wt-timeline">
+
                 <span
                   class="wt-time"
                   id="current-time"
@@ -1741,15 +2667,23 @@ class WatchTogetherApp {
                   max="${this.fileDuration || 1}"
                   step="0.05"
                   value="0"
-                  ${this.isHost ? "" : "disabled"}
+                  ${
+                    this.isHost
+                      ? ""
+                      : "disabled"
+                  }
                 >
 
                 <span class="wt-time">
-                  ${formatTime(this.fileDuration)}
+                  ${formatTime(
+                    this.fileDuration
+                  )}
                 </span>
+
               </div>
 
               <div class="wt-control-right">
+
                 <span aria-hidden="true">
                   🔊
                 </span>
@@ -1771,27 +2705,44 @@ class WatchTogetherApp {
                   aria-label="Movie audio mode"
                   title="Stereo Compatibility mixes surround channels into stereo so music and effects are not lost"
                 >
+
                   <option
                     value="compat"
-                    ${this.movieAudioMode === "compat" ? "selected" : ""}
+                    ${
+                      this.movieAudioMode ===
+                      "compat"
+                        ? "selected"
+                        : ""
+                    }
                   >
                     🎧 Stereo
                   </option>
 
                   <option
                     value="native"
-                    ${this.movieAudioMode === "native" ? "selected" : ""}
+                    ${
+                      this.movieAudioMode ===
+                      "native"
+                        ? "selected"
+                        : ""
+                    }
                   >
                     🔊 Native
                   </option>
+
                 </select>
 
                 <select
                   class="wt-speed"
                   id="speed"
                   aria-label="Playback speed"
-                  ${this.isHost ? "" : "disabled"}
+                  ${
+                    this.isHost
+                      ? ""
+                      : "disabled"
+                  }
                 >
+
                   <option value="0.75">
                     0.75×
                   </option>
@@ -1814,6 +2765,7 @@ class WatchTogetherApp {
                   <option value="2">
                     2×
                   </option>
+
                 </select>
 
                 <button
@@ -1831,13 +2783,19 @@ class WatchTogetherApp {
                 >
                   ⛶
                 </button>
+
               </div>
+
             </div>
+
           </main>
 
           <aside class="wt-side">
+
             <section class="wt-side-card">
+
               <div class="wt-side-head">
+
                 <strong>
                   People
                 </strong>
@@ -1845,16 +2803,20 @@ class WatchTogetherApp {
                 <span id="people-count">
                   ${this.participants.size}/10
                 </span>
+
               </div>
 
               <div
                 class="wt-people-grid"
                 id="people-grid"
               ></div>
+
             </section>
 
             <section class="wt-side-card wt-chat">
+
               <div class="wt-side-head">
+
                 <strong>
                   Chat
                 </strong>
@@ -1862,6 +2824,7 @@ class WatchTogetherApp {
                 <span>
                   Live
                 </span>
+
               </div>
 
               <div
@@ -1873,6 +2836,7 @@ class WatchTogetherApp {
                 class="wt-chat-form"
                 id="chat-form"
               >
+
                 <input
                   id="chat-input"
                   maxlength="500"
@@ -1886,19 +2850,43 @@ class WatchTogetherApp {
                 >
                   Send
                 </button>
+
               </form>
+
             </section>
+
           </aside>
+
         </div>
 
         <div class="wt-bottom-bar">
+
           <div class="wt-media-actions">
+
             <button
               class="wt-btn secondary small"
-              id="enable-media"
+              id="enable-camera"
             >
-              📹 Enable camera & mic
+              📹 Enable camera
             </button>
+
+            <button
+              class="wt-btn secondary small"
+              id="enable-mic"
+            >
+              🎤 Enable microphone
+            </button>
+
+            <select
+              class="wt-speed"
+              id="mic-device"
+              aria-label="Microphone source"
+              title="If Bluetooth movie audio becomes low quality, choose your computer's built-in microphone"
+            >
+              <option value="">
+                Mic source
+              </option>
+            </select>
 
             <button
               class="wt-btn secondary small"
@@ -1939,9 +2927,11 @@ class WatchTogetherApp {
                 `
                 : ""
             }
+
           </div>
 
           <div class="wt-sync">
+
             <span id="sync-label">
               ${esc(this.syncLabel)}
             </span>
@@ -1952,8 +2942,11 @@ class WatchTogetherApp {
             >
               ↻ Sync Now
             </button>
+
           </div>
+
         </div>
+
       </div>
 
       <div
@@ -1969,6 +2962,12 @@ class WatchTogetherApp {
 
     this.video.src =
       this.fileUrl;
+
+    /*
+      Activate local surround → stereo compatibility.
+
+      This does not send movie audio anywhere.
+    */
 
     this.setupMovieAudio()
       .catch(
@@ -2001,7 +3000,9 @@ class WatchTogetherApp {
             "#timeline"
           );
 
-        if (timeline) {
+        if (
+          timeline
+        ) {
           timeline.max =
             String(
               this.video.duration ||
@@ -2010,7 +3011,9 @@ class WatchTogetherApp {
             );
         }
 
-        if (!this.isHost) {
+        if (
+          !this.isHost
+        ) {
           this.send(
             "state-request",
             {
@@ -2027,7 +3030,9 @@ class WatchTogetherApp {
       () => {
         this.resumeMovieAudio();
 
-        if (this.isHost) {
+        if (
+          this.isHost
+        ) {
           this.broadcastPlayback(
             "play"
           );
@@ -2040,7 +3045,9 @@ class WatchTogetherApp {
     this.video.addEventListener(
       "pause",
       () => {
-        if (this.isHost) {
+        if (
+          this.isHost
+        ) {
           this.broadcastPlayback(
             "pause"
           );
@@ -2053,7 +3060,9 @@ class WatchTogetherApp {
     this.video.addEventListener(
       "seeked",
       () => {
-        if (this.isHost) {
+        if (
+          this.isHost
+        ) {
           this.broadcastPlayback(
             "seek"
           );
@@ -2064,7 +3073,9 @@ class WatchTogetherApp {
     this.video.addEventListener(
       "ratechange",
       () => {
-        if (this.isHost) {
+        if (
+          this.isHost
+        ) {
           this.broadcastPlayback(
             "rate"
           );
@@ -2073,15 +3084,23 @@ class WatchTogetherApp {
     );
 
     this.root
-      .querySelector("#play-btn")
+      .querySelector(
+        "#play-btn"
+      )
       ?.addEventListener(
         "click",
         async () => {
-          if (!this.isHost) return;
+          if (
+            !this.isHost
+          ) {
+            return;
+          }
 
           await this.resumeMovieAudio();
 
-          if (this.video.paused) {
+          if (
+            this.video.paused
+          ) {
             await this.video
               .play()
               .catch(
@@ -2095,22 +3114,28 @@ class WatchTogetherApp {
       );
 
     this.root
-      .querySelector("#timeline")
+      .querySelector(
+        "#timeline"
+      )
       ?.addEventListener(
         "input",
         (e) => {
-          if (!this.isHost) return;
-
-          this.video.currentTime =
-            Number(
-              e.target.value ||
-              0
-            );
+          if (
+            this.isHost
+          ) {
+            this.video.currentTime =
+              Number(
+                e.target.value ||
+                0
+              );
+          }
         }
       );
 
     this.root
-      .querySelector("#volume")
+      .querySelector(
+        "#volume"
+      )
       ?.addEventListener(
         "input",
         (e) =>
@@ -2122,7 +3147,9 @@ class WatchTogetherApp {
       );
 
     this.root
-      .querySelector("#audio-mode")
+      .querySelector(
+        "#audio-mode"
+      )
       ?.addEventListener(
         "change",
         async (e) => {
@@ -2136,22 +3163,28 @@ class WatchTogetherApp {
       );
 
     this.root
-      .querySelector("#speed")
+      .querySelector(
+        "#speed"
+      )
       ?.addEventListener(
         "change",
         (e) => {
-          if (!this.isHost) return;
-
-          this.video.playbackRate =
-            Number(
-              e.target.value ||
-              1
-            );
+          if (
+            this.isHost
+          ) {
+            this.video.playbackRate =
+              Number(
+                e.target.value ||
+                1
+              );
+          }
         }
       );
 
     this.root
-      .querySelector("#full-btn")
+      .querySelector(
+        "#full-btn"
+      )
       ?.addEventListener(
         "click",
         () =>
@@ -2163,7 +3196,9 @@ class WatchTogetherApp {
       );
 
     this.root
-      .querySelector("#pip-btn")
+      .querySelector(
+        "#pip-btn"
+      )
       ?.addEventListener(
         "click",
         async () => {
@@ -2189,23 +3224,73 @@ class WatchTogetherApp {
       );
 
     this.root
-      .querySelector("#chat-form")
+      .querySelector(
+        "#chat-form"
+      )
       ?.addEventListener(
         "submit",
         (e) =>
-          this.sendChat(e)
+          this.sendChat(
+            e
+          )
       );
 
+    /*
+      CAMERA AND MICROPHONE ARE NOW SEPARATE.
+
+      This is important because activating a Bluetooth
+      headset microphone can switch the headset into
+      low-quality hands-free audio mode.
+    */
+
     this.root
-      .querySelector("#enable-media")
+      .querySelector(
+        "#enable-camera"
+      )
       ?.addEventListener(
         "click",
         () =>
-          this.enableMedia()
+          this.enableCamera()
       );
 
     this.root
-      .querySelector("#mic-btn")
+      .querySelector(
+        "#enable-mic"
+      )
+      ?.addEventListener(
+        "click",
+        () =>
+          this.enableMicrophone()
+      );
+
+    this.root
+      .querySelector(
+        "#mic-device"
+      )
+      ?.addEventListener(
+        "change",
+        (e) => {
+          const deviceId =
+            String(
+              e.target.value ||
+              ""
+            );
+
+          if (
+            deviceId
+          ) {
+            this.enableMicrophone(
+              deviceId,
+              true
+            );
+          }
+        }
+      );
+
+    this.root
+      .querySelector(
+        "#mic-btn"
+      )
       ?.addEventListener(
         "click",
         () =>
@@ -2213,7 +3298,9 @@ class WatchTogetherApp {
       );
 
     this.root
-      .querySelector("#cam-btn")
+      .querySelector(
+        "#cam-btn"
+      )
       ?.addEventListener(
         "click",
         () =>
@@ -2221,7 +3308,9 @@ class WatchTogetherApp {
       );
 
     this.root
-      .querySelector("#sync-now")
+      .querySelector(
+        "#sync-now"
+      )
       ?.addEventListener(
         "click",
         () =>
@@ -2229,7 +3318,9 @@ class WatchTogetherApp {
       );
 
     this.root
-      .querySelector("#lock-btn")
+      .querySelector(
+        "#lock-btn"
+      )
       ?.addEventListener(
         "click",
         () =>
@@ -2237,7 +3328,9 @@ class WatchTogetherApp {
       );
 
     this.root
-      .querySelector("#end-btn")
+      .querySelector(
+        "#end-btn"
+      )
       ?.addEventListener(
         "click",
         () =>
@@ -2245,15 +3338,20 @@ class WatchTogetherApp {
       );
 
     this.updatePeopleUI();
+
     this.renderMessages();
+
     this.startWatchTimers();
+
     this.updateWatchControlsRole();
 
-    if (this.localStream) {
-      this.updateMediaButtons();
-    }
+    this.updateMediaButtons();
 
-    if (!this.isHost) {
+    this.renderMicrophoneChoices();
+
+    if (
+      !this.isHost
+    ) {
       this.syncClock();
 
       this.send(
@@ -2283,7 +3381,9 @@ class WatchTogetherApp {
       window.AudioContext ||
       window.webkitAudioContext;
 
-    if (!AudioContextClass) {
+    if (
+      !AudioContextClass
+    ) {
       this.movieAudioMode =
         "native";
 
@@ -2303,9 +3403,15 @@ class WatchTogetherApp {
             this.video
           );
 
-      // Once the movie is connected to Web Audio,
-      // keep HTML video volume at 1 and use GainNode volume.
-      this.video.volume = 1;
+      /*
+        HTML video volume remains 1.
+
+        Our Web Audio GainNode controls
+        final volume instead.
+      */
+
+      this.video.volume =
+        1;
 
       await this.rebuildMovieAudioGraph(
         this.movieAudioMode
@@ -2314,7 +3420,11 @@ class WatchTogetherApp {
       await this.resumeMovieAudio();
 
     } catch (error) {
-      // Fallback: reconnect directly so audio never becomes silent.
+      /*
+        Never allow complete silence if the
+        compatibility graph fails.
+      */
+
       try {
         this.movieAudioSource
           ?.disconnect();
@@ -2341,13 +3451,15 @@ class WatchTogetherApp {
       ) {
         await this.audioContext.resume();
       }
+
     } catch {}
   }
 
   setMovieVolume(value) {
     this.movieVolume =
       clamp(
-        Number(value) || 0,
+        Number(value) ||
+          0,
         0,
         1
       );
@@ -2356,11 +3468,13 @@ class WatchTogetherApp {
       this.movieAudioMaster &&
       this.audioContext
     ) {
-      this.movieAudioMaster.gain.setTargetAtTime(
-        this.movieVolume,
-        this.audioContext.currentTime,
-        0.01
-      );
+      this.movieAudioMaster
+        .gain
+        .setTargetAtTime(
+          this.movieVolume,
+          this.audioContext.currentTime,
+          0.01
+        );
 
     } else if (
       this.video
@@ -2370,13 +3484,18 @@ class WatchTogetherApp {
     }
   }
 
-  async setMovieAudioMode(mode) {
+  async setMovieAudioMode(
+    mode
+  ) {
     this.movieAudioMode =
-      mode === "native"
+      mode ===
+      "native"
         ? "native"
         : "compat";
 
-    if (!this.movieAudioSource) {
+    if (
+      !this.movieAudioSource
+    ) {
       await this.setupMovieAudio();
 
       return;
@@ -2389,7 +3508,8 @@ class WatchTogetherApp {
     );
 
     this.toast(
-      this.movieAudioMode === "compat"
+      this.movieAudioMode ===
+        "compat"
         ? "Stereo Compatibility enabled — surround music and effects are mixed into stereo."
         : "Native movie audio enabled.",
       "good"
@@ -2400,22 +3520,30 @@ class WatchTogetherApp {
     try {
       this.movieAudioSource
         ?.disconnect();
+
     } catch {}
 
     for (
       const node
-      of this.movieAudioNodes
+      of
+      this.movieAudioNodes
     ) {
       try {
         node.disconnect();
+
       } catch {}
     }
 
-    this.movieAudioNodes = [];
-    this.movieAudioMaster = null;
+    this.movieAudioNodes =
+      [];
+
+    this.movieAudioMaster =
+      null;
   }
 
-  async rebuildMovieAudioGraph(mode) {
+  async rebuildMovieAudioGraph(
+    mode
+  ) {
     if (
       !this.audioContext ||
       !this.movieAudioSource
@@ -2441,7 +3569,10 @@ class WatchTogetherApp {
       master
     );
 
-    if (mode === "native") {
+    if (
+      mode ===
+      "native"
+    ) {
       this.movieAudioSource.connect(
         master
       );
@@ -2454,27 +3585,21 @@ class WatchTogetherApp {
     }
 
     /*
-      -----------------------------------------------------
-      MOVIE SURROUND → STEREO COMPATIBILITY
-      -----------------------------------------------------
+      SURROUND → STEREO
 
-      Typical 5.1 channel order:
+      Typical 5.1:
 
-      0 = Front Left
-      1 = Front Right
-      2 = Center
-      3 = LFE
-      4 = Surround Left
-      5 = Surround Right
+      0 Front Left
+      1 Front Right
+      2 Center
+      3 LFE
+      4 Surround Left
+      5 Surround Right
 
-      Common 7.1 adds:
+      Common 7.1:
 
-      6 = Back Left
-      7 = Back Right
-
-      This prevents the common browser/device problem where
-      dialogue is audible but BGM / ambience / sound effects
-      are very quiet or missing.
+      6 Back Left
+      7 Back Right
     */
 
     const splitter =
@@ -2515,48 +3640,54 @@ class WatchTogetherApp {
       splitter
     );
 
-    const route = (
-      channel,
-      output,
-      gainValue
-    ) => {
-      const gain =
-        ctx.createGain();
+    const route =
+      (
+        channel,
+        output,
+        gainValue
+      ) => {
+        const gain =
+          ctx.createGain();
 
-      gain.gain.value =
-        gainValue;
+        gain.gain.value =
+          gainValue;
 
-      splitter.connect(
-        gain,
-        channel
-      );
+        splitter.connect(
+          gain,
+          channel
+        );
 
-      gain.connect(
-        merger,
-        0,
-        output
-      );
+        gain.connect(
+          merger,
+          0,
+          output
+        );
 
-      this.movieAudioNodes.push(
-        gain
-      );
-    };
+        this.movieAudioNodes.push(
+          gain
+        );
+      };
 
-    // Front Left
+    /*
+      Front
+    */
+
     route(
       0,
       0,
       0.70
     );
 
-    // Front Right
     route(
       1,
       1,
       0.70
     );
 
-    // Center/dialogue → both ears
+    /*
+      Center dialogue
+    */
+
     route(
       2,
       0,
@@ -2569,7 +3700,10 @@ class WatchTogetherApp {
       0.50
     );
 
-    // LFE / bass
+    /*
+      LFE / bass
+    */
+
     route(
       3,
       0,
@@ -2582,28 +3716,33 @@ class WatchTogetherApp {
       0.10
     );
 
-    // Surround Left
+    /*
+      Surround channels
+      contain BGM / ambience / effects
+    */
+
     route(
       4,
       0,
       0.50
     );
 
-    // Surround Right
     route(
       5,
       1,
       0.50
     );
 
-    // 7.1 Back Left
+    /*
+      7.1 rear
+    */
+
     route(
       6,
       0,
       0.35
     );
 
-    // 7.1 Back Right
     route(
       7,
       1,
@@ -2629,6 +3768,7 @@ class WatchTogetherApp {
     try {
       this.movieAudioSource
         ?.disconnect();
+
     } catch {}
 
     this.movieAudioSource =
@@ -2642,10 +3782,12 @@ class WatchTogetherApp {
 
     if (
       ctx &&
-      ctx.state !== "closed"
+      ctx.state !==
+        "closed"
     ) {
       try {
         ctx.close();
+
       } catch {}
     }
   }
@@ -2680,13 +3822,16 @@ class WatchTogetherApp {
       setInterval(
         () => {
           if (
-            this.phase !== "watch" ||
+            this.phase !==
+              "watch" ||
             !this.video
           ) {
             return;
           }
 
-          if (this.isHost) {
+          if (
+            this.isHost
+          ) {
             this.broadcastPlayback(
               "periodic"
             );
@@ -2704,7 +3849,8 @@ class WatchTogetherApp {
       setInterval(
         () => {
           if (
-            this.phase !== "watch" ||
+            this.phase !==
+              "watch" ||
             !this.video
           ) {
             return;
@@ -2720,7 +3866,9 @@ class WatchTogetherApp {
               "#timeline"
             );
 
-          if (current) {
+          if (
+            current
+          ) {
             current.textContent =
               formatTime(
                 this.video.currentTime
@@ -2740,6 +3888,7 @@ class WatchTogetherApp {
           }
 
           this.updatePlayIcon();
+
           this.updateSyncLabel();
         },
         250
@@ -2747,7 +3896,9 @@ class WatchTogetherApp {
   }
 
   playbackState() {
-    if (!this.video) {
+    if (
+      !this.video
+    ) {
       return null;
     }
 
@@ -2786,7 +3937,8 @@ class WatchTogetherApp {
   }
 
   broadcastPlayback(
-    reason = "update"
+    reason =
+      "update"
   ) {
     if (
       !this.isHost ||
@@ -2799,7 +3951,11 @@ class WatchTogetherApp {
     const state =
       this.playbackState();
 
-    if (!state) return;
+    if (
+      !state
+    ) {
+      return;
+    }
 
     state.reason =
       reason;
@@ -2842,7 +3998,8 @@ class WatchTogetherApp {
       payload;
 
     if (
-      this.phase === "watch"
+      this.phase ===
+      "watch"
     ) {
       this.applySync(
         true
@@ -2851,7 +4008,11 @@ class WatchTogetherApp {
   }
 
   expectedPosition(state) {
-    if (!state) return 0;
+    if (
+      !state
+    ) {
+      return 0;
+    }
 
     let expected =
       Number(
@@ -2859,7 +4020,9 @@ class WatchTogetherApp {
         0
       );
 
-    if (state.playing) {
+    if (
+      state.playing
+    ) {
       const estimatedHostNow =
         Date.now() +
         this.clockOffset;
@@ -2874,7 +4037,7 @@ class WatchTogetherApp {
               estimatedHostNow
             )
           ) /
-          1000
+            1000
         );
 
       expected +=
@@ -2891,17 +4054,21 @@ class WatchTogetherApp {
       Number(
         state.duration ||
         this.fileDuration ||
-        expected + 1
+        expected +
+          1
       )
     );
   }
 
-  async applySync(immediate) {
+  async applySync(
+    immediate
+  ) {
     if (
       this.isHost ||
       !this.video ||
       !this.authoritative ||
-      this.video.readyState < 1
+      this.video.readyState <
+        1
     ) {
       return;
     }
@@ -2954,7 +4121,8 @@ class WatchTogetherApp {
       );
 
     if (
-      abs > 0.5 &&
+      abs >
+        0.5 &&
       Date.now() >
         this.seekCooldownUntil
     ) {
@@ -2977,12 +4145,13 @@ class WatchTogetherApp {
 
     } else if (
       state.playing &&
-      abs >= 0.10
+      abs >=
+        0.10
     ) {
       const correction =
         clamp(
           drift *
-          0.08,
+            0.08,
           -0.04,
           0.04
         );
@@ -3006,11 +4175,13 @@ class WatchTogetherApp {
         );
 
     } else if (
-      abs < 0.07 &&
+      abs <
+        0.07 &&
       Math.abs(
         this.video.playbackRate -
         baseRate
-      ) > 0.002
+      ) >
+        0.002
     ) {
       this.video.playbackRate =
         baseRate;
@@ -3023,9 +4194,15 @@ class WatchTogetherApp {
         "#sync-label"
       );
 
-    if (!el) return;
+    if (
+      !el
+    ) {
+      return;
+    }
 
-    if (this.isHost) {
+    if (
+      this.isHost
+    ) {
       this.syncLabel =
         "✓ Host · authoritative playback";
 
@@ -3041,12 +4218,16 @@ class WatchTogetherApp {
           this.driftMs
         );
 
-      if (abs < 100) {
+      if (
+        abs <
+        100
+      ) {
         this.syncLabel =
           "✓ Synced";
 
       } else if (
-        this.driftMs > 0
+        this.driftMs >
+        0
       ) {
         this.syncLabel =
           `⚠ ${abs}ms behind`;
@@ -3067,13 +4248,19 @@ class WatchTogetherApp {
         "#sync-now"
       );
 
-    if (btn) {
-      btn.disabled = true;
+    if (
+      btn
+    ) {
+      btn.disabled =
+        true;
+
       btn.textContent =
         "Syncing…";
     }
 
-    if (this.isHost) {
+    if (
+      this.isHost
+    ) {
       this.broadcastPlayback(
         "sync-now"
       );
@@ -3100,15 +4287,20 @@ class WatchTogetherApp {
       );
     }
 
-    if (btn) {
-      btn.disabled = false;
+    if (
+      btn
+    ) {
+      btn.disabled =
+        false;
 
       btn.textContent =
         "✓ Synchronized";
 
       setTimeout(
         () => {
-          if (btn) {
+          if (
+            btn
+          ) {
             btn.textContent =
               "↻ Sync Now";
           }
@@ -3133,7 +4325,10 @@ class WatchTogetherApp {
     );
   }
 
-  async syncClock(force = false) {
+  async syncClock(
+    force =
+      false
+  ) {
     if (
       this.isHost ||
       !this.channel ||
@@ -3153,41 +4348,45 @@ class WatchTogetherApp {
       this.clockTimer
     );
 
-    let sent = 0;
+    let sent =
+      0;
 
-    const ping = () => {
-      if (
-        !this.channel ||
-        this.isHost ||
-        !this.hostId ||
-        sent >= 5
-      ) {
-        clearInterval(
-          this.clockTimer
+    const ping =
+      () => {
+        if (
+          !this.channel ||
+          this.isHost ||
+          !this.hostId ||
+          sent >=
+            5
+        ) {
+          clearInterval(
+            this.clockTimer
+          );
+
+          this.clockTimer =
+            null;
+
+          return;
+        }
+
+        this.send(
+          "clock-ping",
+          {
+            from:
+              this.peerId,
+
+            to:
+              this.hostId,
+
+            t0:
+              Date.now(),
+          }
         );
 
-        this.clockTimer =
-          null;
-
-        return;
-      }
-
-      this.send(
-        "clock-ping",
-        {
-          from:
-            this.peerId,
-
-          to:
-            this.hostId,
-
-          t0:
-            Date.now(),
-        }
-      );
-
-      sent += 1;
-    };
+        sent +=
+          1;
+      };
 
     ping();
 
@@ -3251,7 +4450,8 @@ class WatchTogetherApp {
     const rtt =
       Math.max(
         0,
-        t2 - t0
+        t2 -
+          t0
       );
 
     const offset =
@@ -3278,14 +4478,20 @@ class WatchTogetherApp {
       );
 
     const best =
-      [...this.clockSamples]
-        .sort(
-          (a, b) =>
-            a.rtt -
-            b.rtt
-        )[0];
+      [
+        ...this.clockSamples,
+      ].sort(
+        (
+          a,
+          b
+        ) =>
+          a.rtt -
+          b.rtt
+      )[0];
 
-    if (best) {
+    if (
+      best
+    ) {
       this.clockOffset =
         best.offset;
 
@@ -3313,7 +4519,11 @@ class WatchTogetherApp {
           500
         );
 
-    if (!text) return;
+    if (
+      !text
+    ) {
+      return;
+    }
 
     const message = {
       id:
@@ -3387,7 +4597,8 @@ class WatchTogetherApp {
       );
 
     if (
-      this.phase === "watch"
+      this.phase ===
+      "watch"
     ) {
       this.renderMessages();
     }
@@ -3399,7 +4610,11 @@ class WatchTogetherApp {
         "#messages"
       );
 
-    if (!box) return;
+    if (
+      !box
+    ) {
+      return;
+    }
 
     box.innerHTML =
       this.chat.length
@@ -3407,9 +4622,16 @@ class WatchTogetherApp {
             .map(
               (m) => `
                 <div class="wt-message">
+
                   <div class="wt-message-head">
+
                     <strong>
-                      ${esc(m.from === this.peerId ? "You" : m.name)}
+                      ${esc(
+                        m.from ===
+                          this.peerId
+                          ? "You"
+                          : m.name
+                      )}
                     </strong>
 
                     <time>
@@ -3429,11 +4651,13 @@ class WatchTogetherApp {
                         )
                       }
                     </time>
+
                   </div>
 
                   <p>
                     ${esc(m.text)}
                   </p>
+
                 </div>
               `
             )
@@ -3463,9 +4687,13 @@ class WatchTogetherApp {
         ? this.config.stunUrls
         : [
             this.config.stunUrls,
-          ].filter(Boolean);
+          ].filter(
+            Boolean
+          );
 
-    if (stun.length) {
+    if (
+      stun.length
+    ) {
       servers.push({
         urls:
           stun,
@@ -3494,7 +4722,9 @@ class WatchTogetherApp {
 
   ensurePC(peerId) {
     if (
-      this.pcs.has(peerId)
+      this.pcs.has(
+        peerId
+      )
     ) {
       return this.pcs.get(
         peerId
@@ -3520,10 +4750,13 @@ class WatchTogetherApp {
       []
     );
 
-    if (this.localStream) {
+    if (
+      this.localStream
+    ) {
       for (
         const track
-        of this.localStream.getTracks()
+        of
+        this.localStream.getTracks()
       ) {
         pc.addTrack(
           track,
@@ -3573,7 +4806,8 @@ class WatchTogetherApp {
         );
 
         if (
-          this.phase === "watch"
+          this.phase ===
+          "watch"
         ) {
           this.updatePeopleUI();
         }
@@ -3591,7 +4825,9 @@ class WatchTogetherApp {
         ) {
           this.toast(
             `We couldn't connect to ${
-              this.participants.get(peerId)?.name ||
+              this.participants.get(
+                peerId
+              )?.name ||
               "a friend"
             }. Trying again…`,
             "bad"
@@ -3627,7 +4863,8 @@ class WatchTogetherApp {
 
   async makeOffer(
     peerId,
-    iceRestart = false
+    iceRestart =
+      false
   ) {
     const pc =
       this.ensurePC(
@@ -3709,6 +4946,7 @@ class WatchTogetherApp {
               type:
                 "rollback",
             });
+
           } catch {}
         }
 
@@ -3775,7 +5013,9 @@ class WatchTogetherApp {
 
         } else {
           this.iceQueues
-            .get(peerId)
+            .get(
+              peerId
+            )
             ?.push(
               payload.candidate
             );
@@ -3790,7 +5030,9 @@ class WatchTogetherApp {
     }
   }
 
-  async flushIce(peerId) {
+  async flushIce(
+    peerId
+  ) {
     const pc =
       this.pcs.get(
         peerId
@@ -3799,7 +5041,8 @@ class WatchTogetherApp {
     const queue =
       this.iceQueues.get(
         peerId
-      ) || [];
+      ) ||
+      [];
 
     while (
       pc?.remoteDescription &&
@@ -3812,6 +5055,7 @@ class WatchTogetherApp {
         await pc.addIceCandidate(
           candidate
         );
+
       } catch {}
     }
   }
@@ -3836,7 +5080,9 @@ class WatchTogetherApp {
     }
   }
 
-  async restartIce(peerId) {
+  async restartIce(
+    peerId
+  ) {
     if (
       this.peerId.localeCompare(
         peerId
@@ -3861,96 +5107,250 @@ class WatchTogetherApp {
     }
   }
 
-  async enableMedia() {
-    if (this.localStream) {
+  ensureLocalStream() {
+    if (
+      !this.localStream
+    ) {
+      this.localStream =
+        new MediaStream();
+    }
+
+    return this.localStream;
+  }
+
+  /*
+    MICROPHONE SETTINGS
+
+    The microphone is intentionally mono speech.
+
+    autoGainControl = false reduces aggressive
+    browser volume pumping.
+
+    This processing affects ONLY microphone audio,
+    never movie audio.
+  */
+
+  audioConstraints(
+    deviceId =
+      ""
+  ) {
+    const constraints = {
+      echoCancellation: {
+        ideal:
+          true,
+      },
+
+      noiseSuppression: {
+        ideal:
+          true,
+      },
+
+      autoGainControl: {
+        ideal:
+          false,
+      },
+
+      channelCount: {
+        ideal:
+          1,
+      },
+
+      sampleRate: {
+        ideal:
+          48000,
+      },
+    };
+
+    if (
+      deviceId
+    ) {
+      constraints.deviceId = {
+        exact:
+          deviceId,
+      };
+    }
+
+    return constraints;
+  }
+
+  looksLikeBluetoothMic(
+    label =
+      ""
+  ) {
+    return /(bluetooth|hands[- ]?free|headset|airpods|buds|earbuds|galaxy buds|wh-|wf-)/i.test(
+      label
+    );
+  }
+
+  looksLikeBuiltInMic(
+    label =
+      ""
+  ) {
+    return /(built[- ]?in|internal|microphone array|integrated|realtek|macbook|macbook pro|macbook air|internal microphone)/i.test(
+      label
+    );
+  }
+
+  async refreshMicrophones() {
+    try {
+      const devices =
+        await navigator.mediaDevices.enumerateDevices();
+
+      this.microphoneDevices =
+        devices.filter(
+          (d) =>
+            d.kind ===
+              "audioinput" &&
+            d.deviceId
+        );
+
+      this.renderMicrophoneChoices();
+
+      return this.microphoneDevices;
+
+    } catch (error) {
+      console.warn(
+        "Could not list microphones",
+        error
+      );
+
+      return [];
+    }
+  }
+
+  renderMicrophoneChoices() {
+    const select =
+      this.root.querySelector(
+        "#mic-device"
+      );
+
+    if (
+      !select
+    ) {
       return;
     }
 
-    try {
-      this.localStream =
-        await navigator.mediaDevices.getUserMedia({
-          video: {
-            width: {
-              ideal:
-                640,
-            },
+    const current =
+      this.micDeviceId ||
+      select.value ||
+      "";
 
-            height: {
-              ideal:
-                360,
-            },
+    const options = [
+      `
+        <option value="">
+          Mic source
+        </option>
+      `,
 
-            frameRate: {
-              ideal:
-                24,
+      ...this.microphoneDevices.map(
+        (
+          device,
+          index
+        ) => {
+          const label =
+            device.label ||
+            `Microphone ${index + 1}`;
 
-              max:
-                30,
-            },
-          },
-
-          audio: {
-            echoCancellation:
-              true,
-
-            noiseSuppression:
-              true,
-
-            autoGainControl:
-              true,
-          },
-        });
-
-      this.micEnabled =
-        true;
-
-      this.camEnabled =
-        true;
-
-      for (
-        const peerId
-        of this.participants.keys()
-      ) {
-        if (
-          peerId ===
-          this.peerId
-        ) {
-          continue;
-        }
-
-        const pc =
-          this.ensurePC(
-            peerId
-          );
-
-        const senderTrackIds =
-          new Set(
-            pc
-              .getSenders()
-              .map(
-                (s) =>
-                  s.track?.id
-              )
-              .filter(
-                Boolean
-              )
-          );
-
-        for (
-          const track
-          of this.localStream.getTracks()
-        ) {
-          if (
-            !senderTrackIds.has(
-              track.id
+          const hint =
+            this.looksLikeBluetoothMic(
+              label
             )
-          ) {
-            pc.addTrack(
-              track,
-              this.localStream
-            );
-          }
+              ? " · Bluetooth"
+              : "";
+
+          return `
+            <option value="${esc(
+              device.deviceId
+            )}">
+              ${esc(
+                label +
+                hint
+              )}
+            </option>
+          `;
         }
+      ),
+    ];
+
+    select.innerHTML =
+      options.join("");
+
+    if (
+      current &&
+      this.microphoneDevices.some(
+        (d) =>
+          d.deviceId ===
+          current
+      )
+    ) {
+      select.value =
+        current;
+    }
+  }
+
+  async publishLocalTrack(
+    track
+  ) {
+    const stream =
+      this.ensureLocalStream();
+
+    const oldTrack =
+      stream
+        .getTracks()
+        .find(
+          (t) =>
+            t.kind ===
+            track.kind
+        );
+
+    for (
+      const peerId
+      of
+      this.participants.keys()
+    ) {
+      if (
+        peerId ===
+        this.peerId
+      ) {
+        continue;
+      }
+
+      const pc =
+        this.ensurePC(
+          peerId
+        );
+
+      const sender =
+        pc
+          .getSenders()
+          .find(
+            (s) =>
+              s.track ===
+                oldTrack ||
+              s.track?.kind ===
+                track.kind
+          );
+
+      if (
+        sender
+      ) {
+        try {
+          await sender.replaceTrack(
+            track
+          );
+
+        } catch (error) {
+          console.warn(
+            "Could not replace local media track",
+            error
+          );
+        }
+
+      } else {
+        pc.addTrack(
+          track,
+          stream
+        );
 
         if (
           this.peerId.localeCompare(
@@ -3974,25 +5374,339 @@ class WatchTogetherApp {
           );
         }
       }
+    }
+
+    if (
+      oldTrack
+    ) {
+      try {
+        stream.removeTrack(
+          oldTrack
+        );
+
+      } catch {}
+
+      try {
+        oldTrack.stop();
+
+      } catch {}
+    }
+
+    stream.addTrack(
+      track
+    );
+  }
+
+  /*
+    CAMERA IS REQUESTED SEPARATELY.
+
+    audio:false prevents turning on the
+    microphone just because the user wants video.
+  */
+
+  async enableCamera() {
+    const existing =
+      this.localStream
+        ?.getVideoTracks()
+        ?.[0];
+
+    if (
+      existing
+    ) {
+      existing.enabled =
+        true;
+
+      this.camEnabled =
+        true;
 
       await this.trackPresence();
 
       this.updateMediaButtons();
+
+      this.updatePeopleUI();
+
+      return;
+    }
+
+    try {
+      const stream =
+        await navigator.mediaDevices.getUserMedia({
+          video: {
+            width: {
+              ideal:
+                640,
+            },
+
+            height: {
+              ideal:
+                360,
+            },
+
+            frameRate: {
+              ideal:
+                24,
+
+              max:
+                30,
+            },
+          },
+
+          audio:
+            false,
+        });
+
+      const track =
+        stream
+          .getVideoTracks()[0];
+
+      if (
+        !track
+      ) {
+        throw new Error(
+          "No camera track returned"
+        );
+      }
+
+      await this.publishLocalTrack(
+        track
+      );
+
+      this.camEnabled =
+        true;
+
+      await this.trackPresence();
+
+      this.updateMediaButtons();
+
       this.updatePeopleUI();
 
       this.toast(
-        "Camera and microphone connected ✓",
+        "Camera connected ✓",
         "good"
       );
 
     } catch (error) {
       console.warn(
-        "Media permission issue",
+        "Camera permission issue",
         error
       );
 
       this.toast(
-        "Camera or microphone permission was not granted. You can still watch and chat.",
+        "Camera permission was not granted. You can still watch, talk and chat.",
+        "bad"
+      );
+    }
+  }
+
+  /*
+    MICROPHONE IS SEPARATE.
+
+    If the user's default microphone is the
+    Bluetooth headset microphone, WatchTogether tries
+    to use a built-in/internal microphone instead.
+
+    WHY?
+
+    Bluetooth headset output:
+
+      A2DP
+      = high-quality stereo
+
+    Bluetooth headset mic activated:
+
+      HFP/HSP
+      = low-quality communications audio
+
+    Browser JavaScript cannot force Bluetooth hardware
+    to remain in A2DP while using the same headset mic.
+
+    The best solution is:
+
+      Bluetooth headphones → movie output
+      Laptop built-in mic → voice input
+  */
+
+  async enableMicrophone(
+    requestedDeviceId =
+      "",
+    switching =
+      false
+  ) {
+    try {
+      let stream =
+        await navigator.mediaDevices.getUserMedia({
+          video:
+            false,
+
+          audio:
+            this.audioConstraints(
+              requestedDeviceId
+            ),
+        });
+
+      let track =
+        stream
+          .getAudioTracks()[0];
+
+      if (
+        !track
+      ) {
+        throw new Error(
+          "No microphone track returned"
+        );
+      }
+
+      let devices =
+        await this.refreshMicrophones();
+
+      const initialDeviceId =
+        track
+          .getSettings?.()
+          .deviceId ||
+        requestedDeviceId ||
+        "";
+
+      const initialDevice =
+        devices.find(
+          (d) =>
+            d.deviceId ===
+            initialDeviceId
+        );
+
+      /*
+        If default mic is Bluetooth,
+        prefer built-in/internal mic.
+      */
+
+      if (
+        !requestedDeviceId &&
+        this.looksLikeBluetoothMic(
+          initialDevice?.label ||
+          ""
+        )
+      ) {
+        const betterDevice =
+          devices.find(
+            (d) =>
+              this.looksLikeBuiltInMic(
+                d.label
+              )
+          ) ||
+          devices.find(
+            (d) =>
+              !this.looksLikeBluetoothMic(
+                d.label
+              )
+          );
+
+        if (
+          betterDevice &&
+          betterDevice.deviceId !==
+            initialDeviceId
+        ) {
+          try {
+            track.stop();
+
+          } catch {}
+
+          stream =
+            await navigator.mediaDevices.getUserMedia({
+              video:
+                false,
+
+              audio:
+                this.audioConstraints(
+                  betterDevice.deviceId
+                ),
+            });
+
+          track =
+            stream
+              .getAudioTracks()[0];
+
+          requestedDeviceId =
+            betterDevice.deviceId;
+        }
+      }
+
+      if (
+        "contentHint"
+        in track
+      ) {
+        try {
+          track.contentHint =
+            "speech";
+
+        } catch {}
+      }
+
+      this.micDeviceId =
+        track
+          .getSettings?.()
+          .deviceId ||
+        requestedDeviceId ||
+        initialDeviceId ||
+        "";
+
+      await this.publishLocalTrack(
+        track
+      );
+
+      this.micEnabled =
+        true;
+
+      await this.refreshMicrophones();
+
+      await this.trackPresence();
+
+      this.updateMediaButtons();
+
+      this.updatePeopleUI();
+
+      const selected =
+        this.microphoneDevices.find(
+          (d) =>
+            d.deviceId ===
+            this.micDeviceId
+        );
+
+      if (
+        this.looksLikeBluetoothMic(
+          selected?.label ||
+          ""
+        )
+      ) {
+        this.toast(
+          "Bluetooth headset mic selected. If movie audio becomes low-quality, choose your computer's built-in microphone from Mic source.",
+          "bad"
+        );
+
+      } else if (
+        switching
+      ) {
+        this.toast(
+          `Microphone changed to ${
+            selected?.label ||
+            "selected device"
+          } ✓`,
+          "good"
+        );
+
+      } else {
+        this.toast(
+          "Microphone connected ✓",
+          "good"
+        );
+      }
+
+    } catch (error) {
+      console.warn(
+        "Microphone permission issue",
+        error
+      );
+
+      this.toast(
+        "Microphone permission was not granted. You can still watch with camera and chat.",
         "bad"
       );
     }
@@ -4004,7 +5718,13 @@ class WatchTogetherApp {
         ?.getAudioTracks()
         ?.[0];
 
-    if (!track) return;
+    if (
+      !track
+    ) {
+      this.enableMicrophone();
+
+      return;
+    }
 
     track.enabled =
       !track.enabled;
@@ -4013,7 +5733,9 @@ class WatchTogetherApp {
       track.enabled;
 
     this.trackPresence();
+
     this.updateMediaButtons();
+
     this.updatePeopleUI();
   }
 
@@ -4023,7 +5745,13 @@ class WatchTogetherApp {
         ?.getVideoTracks()
         ?.[0];
 
-    if (!track) return;
+    if (
+      !track
+    ) {
+      this.enableCamera();
+
+      return;
+    }
 
     track.enabled =
       !track.enabled;
@@ -4032,14 +5760,21 @@ class WatchTogetherApp {
       track.enabled;
 
     this.trackPresence();
+
     this.updateMediaButtons();
+
     this.updatePeopleUI();
   }
 
   updateMediaButtons() {
-    const enable =
+    const enableCamera =
       this.root.querySelector(
-        "#enable-media"
+        "#enable-camera"
+      );
+
+    const enableMic =
+      this.root.querySelector(
+        "#enable-mic"
       );
 
     const mic =
@@ -4052,20 +5787,49 @@ class WatchTogetherApp {
         "#cam-btn"
       );
 
-    if (
-      enable &&
+    const audioTrack =
       this.localStream
-    ) {
-      enable.textContent =
-        "✓ Camera & mic enabled";
+        ?.getAudioTracks()
+        ?.[0];
 
-      enable.disabled =
-        true;
+    const videoTrack =
+      this.localStream
+        ?.getVideoTracks()
+        ?.[0];
+
+    if (
+      enableCamera
+    ) {
+      enableCamera.textContent =
+        videoTrack
+          ? "✓ Camera enabled"
+          : "📹 Enable camera";
+
+      enableCamera.disabled =
+        Boolean(
+          videoTrack
+        );
     }
 
-    if (mic) {
+    if (
+      enableMic
+    ) {
+      enableMic.textContent =
+        audioTrack
+          ? "✓ Microphone enabled"
+          : "🎤 Enable microphone";
+
+      enableMic.disabled =
+        Boolean(
+          audioTrack
+        );
+    }
+
+    if (
+      mic
+    ) {
       mic.disabled =
-        !this.localStream;
+        !audioTrack;
 
       mic.textContent =
         this.micEnabled
@@ -4073,9 +5837,11 @@ class WatchTogetherApp {
           : "🔇 Unmute";
     }
 
-    if (cam) {
+    if (
+      cam
+    ) {
       cam.disabled =
-        !this.localStream;
+        !videoTrack;
 
       cam.textContent =
         this.camEnabled
@@ -4095,20 +5861,30 @@ class WatchTogetherApp {
         "#people-count"
       );
 
-    if (!grid) return;
+    if (
+      !grid
+    ) {
+      return;
+    }
 
-    if (count) {
+    if (
+      count
+    ) {
       count.textContent =
         `${this.participants.size}/10`;
     }
 
     const sorted =
-      [...this.participants.values()]
-        .sort(
-          (a, b) =>
-            a.joinedAt -
-            b.joinedAt
-        );
+      [
+        ...this.participants.values(),
+      ].sort(
+        (
+          a,
+          b
+        ) =>
+          a.joinedAt -
+          b.joinedAt
+      );
 
     grid.innerHTML =
       sorted
@@ -4135,6 +5911,7 @@ class WatchTogetherApp {
               !self
                 ? `
                   <span>
+
                     <button
                       class="kick-peer"
                       data-peer="${esc(p.peerId)}"
@@ -4152,6 +5929,7 @@ class WatchTogetherApp {
                     >
                       🔇
                     </button>
+
                   </span>
                 `
                 : "";
@@ -4161,6 +5939,7 @@ class WatchTogetherApp {
                 class="wt-person-card"
                 data-person="${esc(p.peerId)}"
               >
+
                 ${
                   stream &&
                   cameraOn
@@ -4169,40 +5948,65 @@ class WatchTogetherApp {
                         id="peer-video-${esc(p.peerId)}"
                         autoplay
                         playsinline
-                        ${self ? "muted" : ""}
+                        ${
+                          self
+                            ? "muted"
+                            : ""
+                        }
                       ></video>
                     `
                     : `
                       <div class="wt-person-placeholder">
+
                         <div>
+
                           <div class="avatar">
                             👤
                           </div>
 
                           ${esc(p.name)}
+
                           <br>
 
                           Camera off
+
                         </div>
+
                       </div>
                     `
                 }
 
                 <div class="wt-person-name">
+
                   <span>
+
                     ${
-                      p.peerId === this.hostId
+                      p.peerId ===
+                      this.hostId
                         ? "👑 "
                         : ""
                     }
 
-                    ${esc(self ? "You" : p.name)}
+                    ${
+                      esc(
+                        self
+                          ? "You"
+                          : p.name
+                      )
+                    }
 
-                    ${p.mic ? "🎤" : "🔇"}
+                    ${
+                      p.mic
+                        ? "🎤"
+                        : "🔇"
+                    }
+
                   </span>
 
                   ${moderation}
+
                 </div>
+
               </div>
             `;
           }
@@ -4216,7 +6020,8 @@ class WatchTogetherApp {
 
     for (
       const p
-      of sorted
+      of
+      sorted
     ) {
       const self =
         p.peerId ===
@@ -4231,7 +6036,9 @@ class WatchTogetherApp {
 
       const video =
         this.root.querySelector(
-          `#peer-video-${CSS.escape(p.peerId)}`
+          `#peer-video-${CSS.escape(
+            p.peerId
+          )}`
         );
 
       if (
@@ -4303,7 +6110,9 @@ class WatchTogetherApp {
 
               this.toast(
                 `Mute request sent to ${
-                  this.participants.get(to)?.name ||
+                  this.participants.get(
+                    to
+                  )?.name ||
                   "participant"
                 }.`,
                 "good"
@@ -4328,7 +6137,9 @@ class WatchTogetherApp {
         ?.getAudioTracks()
         ?.[0];
 
-    if (track) {
+    if (
+      track
+    ) {
       track.enabled =
         false;
 
@@ -4336,7 +6147,9 @@ class WatchTogetherApp {
         false;
 
       this.trackPresence();
+
       this.updateMediaButtons();
+
       this.updatePeopleUI();
     }
 
@@ -4348,7 +6161,8 @@ class WatchTogetherApp {
 
   updateWatchControlsRole() {
     if (
-      this.phase !== "watch"
+      this.phase !==
+      "watch"
     ) {
       return;
     }
@@ -4368,24 +6182,32 @@ class WatchTogetherApp {
         "#speed"
       );
 
-    if (play) {
+    if (
+      play
+    ) {
       play.disabled =
         !this.isHost;
     }
 
-    if (timeline) {
+    if (
+      timeline
+    ) {
       timeline.disabled =
         !this.isHost;
     }
 
-    if (speed) {
+    if (
+      speed
+    ) {
       speed.disabled =
         !this.isHost;
     }
   }
 
   toggleLock() {
-    if (!this.isHost) {
+    if (
+      !this.isHost
+    ) {
       return;
     }
 
@@ -4419,7 +6241,9 @@ class WatchTogetherApp {
         "#lock-btn"
       );
 
-    if (btn) {
+    if (
+      btn
+    ) {
       btn.textContent =
         this.locked
           ? "🔒 Unlock room"
@@ -4480,13 +6304,17 @@ class WatchTogetherApp {
 
     setTimeout(
       () =>
-        this.leaveRoom(true),
+        this.leaveRoom(
+          true
+        ),
       650
     );
   }
 
   endRoom() {
-    if (!this.isHost) {
+    if (
+      !this.isHost
+    ) {
       return;
     }
 
@@ -4498,7 +6326,9 @@ class WatchTogetherApp {
       }
     );
 
-    this.leaveRoom(true);
+    this.leaveRoom(
+      true
+    );
   }
 
   onEndRoom(payload) {
@@ -4516,12 +6346,17 @@ class WatchTogetherApp {
 
     setTimeout(
       () =>
-        this.leaveRoom(true),
+        this.leaveRoom(
+          true
+        ),
       650
     );
   }
 
-  async send(event, payload) {
+  async send(
+    event,
+    payload
+  ) {
     if (
       !this.channel ||
       !this.connected
@@ -4558,19 +6393,25 @@ class WatchTogetherApp {
         ".wt-top-actions .wt-pill"
       );
 
-    if (!pills.length) {
+    if (
+      !pills.length
+    ) {
       return;
     }
 
     const status =
-      [...pills].find(
+      [
+        ...pills,
+      ].find(
         (el) =>
           el.querySelector(
             ".wt-dot"
           )
       );
 
-    if (!status) {
+    if (
+      !status
+    ) {
       return;
     }
 
@@ -4595,6 +6436,18 @@ class WatchTogetherApp {
   }
 
   scheduleReconnect() {
+    /*
+      Never reconnect if user deliberately
+      pressed Leave / End Room.
+    */
+
+    if (
+      this.intentionalDisconnect ||
+      this.destroyed
+    ) {
+      return;
+    }
+
     clearTimeout(
       this.reconnectTimer
     );
@@ -4610,6 +6463,7 @@ class WatchTogetherApp {
         () => {
           if (
             !this.destroyed &&
+            !this.intentionalDisconnect &&
             this.connectionStatus !==
               "connected" &&
             code &&
@@ -4632,9 +6486,12 @@ class WatchTogetherApp {
         peerId
       );
 
-    if (pc) {
+    if (
+      pc
+    ) {
       try {
         pc.close();
+
       } catch {}
     }
 
@@ -4651,15 +6508,31 @@ class WatchTogetherApp {
     );
 
     if (
-      this.phase === "watch"
+      this.phase ===
+      "watch"
     ) {
       this.updatePeopleUI();
     }
   }
 
   async leaveRoom(
-    goHome = true
+    goHome =
+      true
   ) {
+    /*
+      VERY IMPORTANT FIX
+
+      Set this BEFORE Supabase channel removal.
+
+      Supabase can emit CLOSED during removeChannel().
+
+      Previously CLOSED triggered scheduleReconnect()
+      and reopened the old room.
+    */
+
+    this.intentionalDisconnect =
+      true;
+
     clearInterval(
       this.syncTimer
     );
@@ -4685,18 +6558,18 @@ class WatchTogetherApp {
       this.reconnectTimer
     );
 
-    if (this.channel) {
-      try {
-        await this.channel.untrack();
-      } catch {}
+    this.reconnectTimer =
+      null;
 
-      try {
-        await this.supabase
-          ?.removeChannel(
-            this.channel
-          );
-      } catch {}
-    }
+    /*
+      Detach reference before removing channel.
+
+      This further prevents CLOSED callbacks
+      from matching the currently active room.
+    */
+
+    const channel =
+      this.channel;
 
     this.channel =
       null;
@@ -4704,12 +6577,39 @@ class WatchTogetherApp {
     this.connected =
       false;
 
+    if (
+      channel
+    ) {
+      try {
+        await channel.untrack();
+
+      } catch {}
+
+      try {
+        await this.supabase
+          ?.removeChannel(
+            channel
+          );
+
+      } catch {}
+    }
+
+    clearTimeout(
+      this.reconnectTimer
+    );
+
+    this.reconnectTimer =
+      null;
+
     this.connectionStatus =
       "offline";
 
     for (
       const peerId
-      of [...this.pcs.keys()]
+      of
+      [
+        ...this.pcs.keys(),
+      ]
     ) {
       this.closePeer(
         peerId
@@ -4735,8 +6635,11 @@ class WatchTogetherApp {
     this.clockOffset =
       0;
 
-    if (goHome) {
+    if (
+      goHome
+    ) {
       this.cleanupMovieAudio();
+
       this.stopLocalMedia();
 
       this.phase =
@@ -4745,17 +6648,36 @@ class WatchTogetherApp {
       this.roomCode =
         "";
 
-      this.updateUrl("");
+      this.name =
+        "";
+
+      this.creating =
+        false;
+
+      this.config.roomFromUrl =
+        "";
+
+      /*
+        Remove ?room=WATCH-XXXX
+        from browser URL.
+      */
+
+      this.updateUrl(
+        ""
+      );
 
       this.render();
     }
   }
 
   stopLocalMedia() {
-    if (this.localStream) {
+    if (
+      this.localStream
+    ) {
       for (
         const track
-        of this.localStream.getTracks()
+        of
+        this.localStream.getTracks()
       ) {
         track.stop();
       }
@@ -4771,17 +6693,27 @@ class WatchTogetherApp {
       false;
   }
 
-  updateUrl(roomCode) {
+  updateUrl(
+    roomCode
+  ) {
     try {
+      const cleanRoom =
+        safeRoomCode(
+          roomCode ||
+          ""
+        );
+
       const url =
         new URL(
           window.location.href
         );
 
-      if (roomCode) {
+      if (
+        cleanRoom
+      ) {
         url.searchParams.set(
           "room",
-          roomCode
+          cleanRoom
         );
 
       } else {
@@ -4796,16 +6728,29 @@ class WatchTogetherApp {
         url.toString()
       );
 
+      /*
+        Keep local config in sync too.
+      */
+
+      this.config.roomFromUrl =
+        cleanRoom;
+
     } catch {}
   }
 
-  toast(text, kind = "") {
+  toast(
+    text,
+    kind =
+      ""
+  ) {
     let stack =
       this.root.querySelector(
         "#toast-stack"
       );
 
-    if (!stack) {
+    if (
+      !stack
+    ) {
       stack =
         document.createElement(
           "div"
@@ -4853,9 +6798,12 @@ class WatchTogetherApp {
     );
 
     this.cleanupMovieAudio();
+
     this.stopLocalMedia();
 
-    if (this.fileUrl) {
+    if (
+      this.fileUrl
+    ) {
       URL.revokeObjectURL(
         this.fileUrl
       );
@@ -4870,9 +6818,11 @@ export default function({
   if (
     parentElement.__watchTogetherApp
   ) {
-    parentElement.__watchTogetherApp.updateConfig(
-      data
-    );
+    parentElement
+      .__watchTogetherApp
+      .updateConfig(
+        data
+      );
 
     return;
   }
@@ -4885,7 +6835,8 @@ export default function({
   const app =
     new WatchTogetherApp(
       root,
-      data || {}
+      data ||
+      {}
     );
 
   parentElement.__watchTogetherApp =
