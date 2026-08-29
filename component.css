@@ -67,6 +67,8 @@ button { cursor: pointer; }
 .wt-modal-card { width:min(560px,calc(100% - 28px)); border-radius:24px; padding:28px; }
 .wt-modal-card h2 { margin:0 0 8px; font-size:30px; letter-spacing:-.035em; }
 .wt-modal-card > p { color:var(--muted); margin:0 0 24px; line-height:1.55; }
+.wt-source-tabs { display:flex; gap:8px; margin:4px 0 18px; }
+.wt-source-tabs .wt-btn { flex:1; }
 .wt-form-row { display:grid; gap:7px; margin:15px 0; }
 .wt-form-row label { color:#c7cedf; font-size:12px; font-weight:700; }
 .wt-input, .wt-select { width:100%; min-height:48px; padding:0 14px; color:var(--text); background:#0d111c; border:1px solid var(--border); border-radius:12px; }
@@ -95,6 +97,7 @@ button { cursor: pointer; }
 .wt-player-card { min-width:0; border:1px solid var(--border); border-radius:20px; overflow:hidden; background:#030408; box-shadow:var(--shadow); }
 .wt-video-wrap { position:relative; aspect-ratio:16/9; background:#000; display:grid; place-items:center; }
 .wt-video { width:100%; height:100%; object-fit:contain; background:#000; }
+.wt-video-wrap iframe { position:absolute; inset:0; width:100%; height:100%; border:0; }
 .wt-video-empty { position:absolute; inset:0; display:grid; place-items:center; color:#5c667d; text-align:center; pointer-events:none; }
 .wt-video-empty .big { font-size:42px; display:block; margin-bottom:8px; }
 .wt-player-overlay { position:absolute; left:14px; top:14px; display:flex; gap:8px; z-index:3; }
@@ -116,7 +119,7 @@ button { cursor: pointer; }
 .wt-people-grid { display:grid; grid-template-columns:1fr 1fr; gap:8px; padding:10px; }
 .wt-person-card { position:relative; aspect-ratio:4/3; border-radius:12px; overflow:hidden; background:linear-gradient(145deg,#22293b,#10141e); border:1px solid var(--border); }
 .wt-person-card video { width:100%; height:100%; object-fit:cover; background:#11151f; }
-.wt-person-placeholder { position:absolute; inset:0; display:grid; place-items:center; text-align:center; color:#8d97ad; font-size:11px; }
+.wt-person-placeholder { position:absolute; inset:0; display:grid; place-items:center; text-align:center; color:#8d97ad; font-size:11px; background:linear-gradient(145deg,#22293b,#10141e); }
 .wt-person-placeholder .avatar { width:43px; height:43px; margin:0 auto 7px; border-radius:50%; background:#2b3348; display:grid; place-items:center; font-size:18px; color:#dce2f1; }
 .wt-person-name { position:absolute; left:7px; right:7px; bottom:7px; display:flex; align-items:center; justify-content:space-between; gap:6px; padding:5px 7px; border-radius:8px; background:rgba(4,5,8,.62); backdrop-filter:blur(9px); font-size:9px; }
 .wt-chat { height:330px; display:flex; flex-direction:column; }

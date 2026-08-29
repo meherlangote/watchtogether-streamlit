@@ -1,12 +1,15 @@
 # WatchTogether — Streamlit Cloud Edition 🎬
 
-A deployable watch-party app for 2–10 friends. Each person selects the same movie from their own computer. The movie stays local in the browser; only small synchronization, chat, presence, and WebRTC signaling messages are sent through Supabase Realtime.
+A deployable watch-party app for 2–10 friends. Watch a local movie file together (each person selects the same file from their own computer — the movie stays local in the browser) or watch a YouTube video together. Only small synchronization, chat, presence, and WebRTC signaling messages are sent through Supabase Realtime.
 
 ## What this version includes
 
 - Create a watch room with a random `WATCH-XXXXXX` code
 - Shareable invite URL (`?room=WATCH-XXXXXX`)
 - Join by room code or invite link
+- Two watch sources, chosen by the host:
+  - **Local movie file** — browser-only file picker, verified against the host's copy (see below)
+  - **YouTube video** — host pastes a link or video ID; guests join the same video automatically, no upload or extra secret required
 - Browser-only local movie picker (`<input type="file">`)
 - Local playback with `URL.createObjectURL(file)`
 - Incremental full-file SHA-256 fingerprinting in 16 MB chunks
@@ -141,24 +144,22 @@ No terminal commands are required.
 2. Click **Create Watch Room**.
 3. Enter your name.
 4. Copy/share the invite link.
-5. Click **Choose Movie**.
-6. Pick the movie from the browser file picker.
-7. Wait for SHA-256 verification.
-8. Enter the watch room.
-9. Optionally enable camera and microphone.
-10. Play/pause/seek the movie.
+5. Click **Choose What To Watch**.
+6. Pick **Local File** (choose a movie from the browser file picker, wait for SHA-256 verification) or **YouTube** (paste a video link or ID, click **Use this video**).
+7. Enter the watch room.
+8. Optionally enable camera and microphone.
+9. Play/pause/seek.
 
 ### Friend
 
 1. Open the invite link.
 2. Enter their name.
 3. Join the room.
-4. Choose their own local copy of the exact same movie.
-5. Wait for the SHA-256 comparison.
-6. Enter the watch room.
-7. Optionally enable camera and microphone.
+4. If the host chose a local file: choose their own local copy of the exact same movie and wait for the SHA-256 comparison. If the host chose YouTube: nothing to pick — the same video loads automatically.
+5. Enter the watch room.
+6. Optionally enable camera and microphone.
 
-Each computer decodes its own original local file.
+For local-file rooms, each computer decodes its own original local file. For YouTube rooms, everyone streams the same public video directly from YouTube.
 
 ---
 

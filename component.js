@@ -791,6 +791,221 @@ function safeRoomCode(value) {
     : code.slice(0, 18);
 }
 
+function parseYoutubeId(value) {
+  const raw = String(value || "").trim();
+
+  if (!raw) {
+    return "";
+  }
+
+  if (/^[\w-]{11}$/.test(raw)) {
+    return raw;
+  }
+
+  try {
+    const url = new URL(
+      /^https?:\/\//i.test(raw) ? raw : `https://${raw}`
+    );
+
+    const host = url.hostname.replace(/^www\./, "");
+
+    if (host === "youtu.be") {
+      const id = url.pathname.split("/").filter(Boolean)[0] || "";
+
+      if (/^[\w-]{11}$/.test(id)) {
+        return id;
+      }
+    }
+
+    if (host === "youtube.com" || host === "m.youtube.com" || host === "music.youtube.com") {
+      const v = url.searchParams.get("v") || "";
+
+      if (/^[\w-]{11}$/.test(v)) {
+        return v;
+      }
+
+      const match = url.pathname.match(/\/(?:embed|shorts|live)\/([\w-]{11})/);
+
+      if (match) {
+        return match[1];
+      }
+    }
+  } catch {}
+
+  return "";
+}
+
+let youtubeIframeApiPromise = null;
+
+function loadYoutubeIframeApi() {
+  if (window.YT && window.YT.Player) {
+    return Promise.resolve(window.YT);
+  }
+
+  if (youtubeIframeApiPromise) {
+    return youtubeIframeApiPromise;
+  }
+
+  youtubeIframeApiPromise = new Promise((resolve, reject) => {
+    const previous = window.onYouTubeIframeAPIReady;
+
+    window.onYouTubeIframeAPIReady = () => {
+      previous?.();
+      resolve(window.YT);
+    };
+
+    const script = document.createElement("script");
+
+    script.src = "https://www.youtube.com/iframe_api";
+    script.async = true;
+
+    script.addEventListener("error", () => {
+      youtubeIframeApiPromise = null;
+
+      reject(new Error("Could not load the YouTube player"));
+    });
+
+    document.head.appendChild(script);
+  });
+
+  return youtubeIframeApiPromise;
+}
+
+class YoutubeMediaAdapter extends EventTarget {
+  constructor(container, videoId) {
+    super();
+
+    this.duration = 0;
+    this.readyState = 0;
+    this.paused = true;
+    this.destroyed = false;
+    this.player = null;
+
+    this.ready = loadYoutubeIframeApi().then(
+      (YT) =>
+        new Promise((resolve) => {
+          if (this.destroyed) {
+            resolve();
+            return;
+          }
+
+          this.player = new YT.Player(container, {
+            videoId,
+            playerVars: {
+              autoplay: 0,
+              controls: 0,
+              disablekb: 1,
+              modestbranding: 1,
+              rel: 0,
+              playsinline: 1,
+              origin: window.location.origin,
+            },
+            events: {
+              onReady: () => {
+                this.readyState = 1;
+                this.duration = this.player.getDuration() || 0;
+                this.dispatchEvent(new Event("loadedmetadata"));
+                resolve();
+              },
+              onStateChange: (event) => this._onStateChange(event),
+              onError: () => {
+                this.dispatchEvent(new Event("error"));
+              },
+            },
+          });
+        })
+    );
+  }
+
+  _onStateChange(event) {
+    const YT = window.YT;
+
+    if (!YT) {
+      return;
+    }
+
+    if (event.data === YT.PlayerState.PLAYING) {
+      this.duration = this.player.getDuration() || this.duration;
+
+      if (this.paused) {
+        this.paused = false;
+        this.dispatchEvent(new Event("play"));
+      }
+    } else if (event.data === YT.PlayerState.PAUSED) {
+      if (!this.paused) {
+        this.paused = true;
+        this.dispatchEvent(new Event("pause"));
+      }
+    } else if (event.data === YT.PlayerState.ENDED) {
+      this.paused = true;
+      this.dispatchEvent(new Event("pause"));
+      this.dispatchEvent(new Event("ended"));
+    }
+  }
+
+  get currentTime() {
+    return this.player?.getCurrentTime?.() || 0;
+  }
+
+  set currentTime(value) {
+    this.player?.seekTo?.(Number(value) || 0, true);
+    this.dispatchEvent(new Event("seeked"));
+  }
+
+  get playbackRate() {
+    return this.player?.getPlaybackRate?.() || 1;
+  }
+
+  set playbackRate(value) {
+    this.player?.setPlaybackRate?.(Number(value) || 1);
+    this.dispatchEvent(new Event("ratechange"));
+  }
+
+  get volume() {
+    const v = this.player?.getVolume?.();
+
+    return Number.isFinite(v) ? v / 100 : 1;
+  }
+
+  set volume(value) {
+    this.player?.setVolume?.(
+      Math.round(Math.min(1, Math.max(0, Number(value) || 0)) * 100)
+    );
+  }
+
+  get muted() {
+    return this.player?.isMuted?.() || false;
+  }
+
+  set muted(value) {
+    if (value) {
+      this.player?.mute?.();
+    } else {
+      this.player?.unMute?.();
+    }
+  }
+
+  play() {
+    this.player?.playVideo?.();
+
+    return Promise.resolve();
+  }
+
+  pause() {
+    this.player?.pauseVideo?.();
+  }
+
+  destroy() {
+    this.destroyed = true;
+
+    try {
+      this.player?.destroy?.();
+    } catch {}
+
+    this.player = null;
+  }
+}
+
 class WatchTogetherApp {
   constructor(root, config) {
     this.root = root;
@@ -898,6 +1113,9 @@ class WatchTogetherApp {
 
     this.iceQueues =
       new Map();
+
+    this.pendingOffers =
+      new Set();
 
     this.micEnabled =
       false;
@@ -1066,6 +1284,15 @@ class WatchTogetherApp {
 
     this.movieVolume =
       1;
+
+    this.sourceType =
+      "";
+
+    this.youtubeVideoId =
+      "";
+
+    this.youtubeVideoTitle =
+      "";
   }
 
   async init() {
@@ -2079,6 +2306,14 @@ class WatchTogetherApp {
                     this.fileDuration ||
                     0,
 
+                  sourceType:
+                    this.sourceType ||
+                    "",
+
+                  youtubeVideoId:
+                    this.youtubeVideoId ||
+                    "",
+
                   mic:
                     this.micEnabled,
 
@@ -2257,6 +2492,14 @@ class WatchTogetherApp {
           this.fileDuration ||
           0,
 
+        sourceType:
+          this.sourceType ||
+          "",
+
+        youtubeVideoId:
+          this.youtubeVideoId ||
+          "",
+
         mic:
           Boolean(
             this.micEnabled
@@ -2371,6 +2614,14 @@ class WatchTogetherApp {
                   presence.movieDuration ||
                   0
                 ),
+
+              sourceType:
+                presence.sourceType ||
+                "",
+
+              youtubeVideoId:
+                presence.youtubeVideoId ||
+                "",
 
               mic:
                 Boolean(
@@ -2560,6 +2811,8 @@ class WatchTogetherApp {
 
     this.verifyAgainstHost();
 
+    this.verifyYoutubeSource();
+
     if (
       this.phase ===
       "lobby"
@@ -2642,8 +2895,8 @@ class WatchTogetherApp {
             <p>
               ${
                 this.isHost
-                  ? "Share this invite, then choose your local copy of the movie."
-                  : "Choose the same local movie file as the host."
+                  ? "Share this invite, then choose a local movie or a YouTube video to watch."
+                  : "Continue to join the host's movie or YouTube video."
               }
             </p>
 
@@ -2694,7 +2947,11 @@ class WatchTogetherApp {
                 type="button"
                 id="choose-movie"
               >
-                🎬 Choose Movie
+                ${
+                  this.isHost
+                    ? "▶ Choose What To Watch"
+                    : "▶ Continue"
+                }
               </button>
 
             </div>
@@ -2880,11 +3137,123 @@ class WatchTogetherApp {
     await this.copyInvite();
   }
 
+  verifyYoutubeSource() {
+    const host =
+      this.participants.get(
+        this.hostId
+      );
+
+    if (this.isHost) {
+      if (
+        this.sourceType !==
+        "youtube"
+      ) {
+        return;
+      }
+
+      this.verified =
+        Boolean(
+          this.youtubeVideoId
+        );
+
+      this.verifyMessage =
+        this.youtubeVideoId
+          ? "YouTube video ready. Friends will join the same video."
+          : "Paste a YouTube link to continue.";
+
+    } else {
+      if (
+        (host?.sourceType ||
+          "") !==
+        "youtube"
+      ) {
+        return;
+      }
+
+      this.sourceType =
+        "youtube";
+
+      this.youtubeVideoId =
+        host.youtubeVideoId ||
+        "";
+
+      this.verified =
+        Boolean(
+          this.youtubeVideoId
+        );
+
+      this.verifyMessage =
+        this.verified
+          ? "Host's YouTube video is ready ✓"
+          : "Waiting for the host to choose a YouTube video…";
+    }
+
+    if (
+      this.phase ===
+      "movie"
+    ) {
+      const status =
+        this.root.querySelector(
+          ".wt-status-box"
+        );
+
+      if (status) {
+        status.className =
+          `wt-status-box ${
+            this.verified
+              ? "good"
+              : "bad"
+          }`;
+
+        status.textContent =
+          `${
+            this.verified
+              ? "✓"
+              : "⚠"
+          } ${
+            this.verifyMessage
+          }`;
+      }
+
+      const enter =
+        this.root.querySelector(
+          "#enter-watch"
+        );
+
+      if (enter) {
+        enter.disabled =
+          !this.verified;
+      }
+    }
+  }
+
   renderMovieSelect() {
     const host =
       this.participants.get(
         this.hostId
       );
+
+    if (
+      !this.isHost
+    ) {
+      this.sourceType =
+        host?.sourceType ||
+        "";
+
+      this.youtubeVideoId =
+        host?.youtubeVideoId ||
+        "";
+    }
+
+    this.verifyYoutubeSource();
+
+    const activeTab =
+      this.sourceType ||
+      "file";
+
+    const isYoutube =
+      activeTab ===
+      "youtube";
 
     const hostText =
       host?.movieHash
@@ -2942,6 +3311,160 @@ class WatchTogetherApp {
             </div>
           `;
 
+    const filePanel = `
+      <label
+        class="wt-file-drop"
+        for="movie-file"
+      >
+
+        <div>
+
+          <div class="wt-file-icon">
+            🎬
+          </div>
+
+          <h3>
+            ${
+              this.file
+                ? esc(
+                    this.file.name
+                  )
+                : "Select your movie file"
+            }
+          </h3>
+
+          <p class="wt-muted">
+            ${
+              this.file
+                ? `${
+                    formatBytes(
+                      this.file.size
+                    )
+                  } · ${
+                    formatTime(
+                      this.fileDuration
+                    )
+                  }`
+                : "MP4, WebM and other formats supported by your browser"
+            }
+          </p>
+
+          <span class="wt-btn secondary small">
+            Choose Movie
+          </span>
+
+        </div>
+
+      </label>
+
+      <input
+        class="wt-hidden"
+        id="movie-file"
+        type="file"
+        accept="video/*,.mkv,.mp4,.webm,.mov,.m4v"
+      >
+
+      ${status}
+    `;
+
+    const youtubeStatus = `
+      <div
+        class="wt-status-box ${
+          this.verified
+            ? "good"
+            : "bad"
+        }"
+      >
+        ${
+          this.verified
+            ? "✓"
+            : "⚠"
+        }
+
+        ${esc(
+          this.verifyMessage
+        )}
+      </div>
+    `;
+
+    const youtubePanel = `
+      <div class="wt-form-row">
+
+        <label for="youtube-url">
+          YouTube link or video ID
+        </label>
+
+        <input
+          class="wt-input"
+          id="youtube-url"
+          placeholder="https://www.youtube.com/watch?v=…"
+          value="${
+            this.isHost &&
+            this.youtubeVideoId
+              ? esc(
+                  this.youtubeVideoId
+                )
+              : ""
+          }"
+          ${
+            this.isHost
+              ? ""
+              : "disabled"
+          }
+        >
+
+      </div>
+
+      ${
+        this.isHost
+          ? `
+            <button
+              class="wt-btn secondary small"
+              type="button"
+              id="youtube-use"
+            >
+              Use this video
+            </button>
+          `
+          : ""
+      }
+
+      ${youtubeStatus}
+    `;
+
+    const tabs =
+      this.isHost
+        ? `
+          <div class="wt-source-tabs">
+
+            <button
+              type="button"
+              class="wt-btn ${
+                !isYoutube
+                  ? "primary"
+                  : "secondary"
+              } small"
+              id="tab-file"
+            >
+              🎬 Local File
+            </button>
+
+            <button
+              type="button"
+              class="wt-btn ${
+                isYoutube
+                  ? "primary"
+                  : "secondary"
+              } small"
+              id="tab-youtube"
+            >
+              ▶ YouTube
+            </button>
+
+          </div>
+        `
+        : "";
+
     this.root.innerHTML = `
       <div class="wt-shell">
 
@@ -2952,67 +3475,24 @@ class WatchTogetherApp {
           <div class="wt-modal-card">
 
             <h2>
-              Choose Your Movie
+              Choose What To Watch
             </h2>
 
             <p>
-              Your browser reads this file locally.
-              The movie is never uploaded to Streamlit or Supabase.
+              ${
+                isYoutube
+                  ? "Everyone in the room streams the same public YouTube video directly from YouTube."
+                  : "Your browser reads this file locally. The movie is never uploaded to Streamlit or Supabase."
+              }
             </p>
 
-            <label
-              class="wt-file-drop"
-              for="movie-file"
-            >
+            ${tabs}
 
-              <div>
-
-                <div class="wt-file-icon">
-                  🎬
-                </div>
-
-                <h3>
-                  ${
-                    this.file
-                      ? esc(
-                          this.file.name
-                        )
-                      : "Select your movie file"
-                  }
-                </h3>
-
-                <p class="wt-muted">
-                  ${
-                    this.file
-                      ? `${
-                          formatBytes(
-                            this.file.size
-                          )
-                        } · ${
-                          formatTime(
-                            this.fileDuration
-                          )
-                        }`
-                      : "MP4, WebM and other formats supported by your browser"
-                  }
-                </p>
-
-                <span class="wt-btn secondary small">
-                  Choose Movie
-                </span>
-
-              </div>
-
-            </label>
-
-            <input
-              class="wt-hidden"
-              id="movie-file"
-              type="file"
-              accept="video/*,.mkv,.mp4,.webm,.mov,.m4v"
-            >
-
-            ${status}
+            ${
+              isYoutube
+                ? youtubePanel
+                : filePanel
+            }
 
             <div class="wt-modal-actions">
 
@@ -3075,6 +3555,83 @@ class WatchTogetherApp {
 
     this.root
       .querySelector(
+        "#tab-file"
+      )
+      ?.addEventListener(
+        "click",
+        () => {
+          this.sourceType =
+            "file";
+
+          this.verifyAgainstHost();
+
+          this.render();
+        }
+      );
+
+    this.root
+      .querySelector(
+        "#tab-youtube"
+      )
+      ?.addEventListener(
+        "click",
+        () => {
+          this.sourceType =
+            "youtube";
+
+          this.verifyYoutubeSource();
+
+          this.render();
+        }
+      );
+
+    this.root
+      .querySelector(
+        "#youtube-use"
+      )
+      ?.addEventListener(
+        "click",
+        async () => {
+          const input =
+            this.root.querySelector(
+              "#youtube-url"
+            );
+
+          const id =
+            parseYoutubeId(
+              input?.value
+            );
+
+          if (!id) {
+            this.toast(
+              "That doesn't look like a valid YouTube link.",
+              "bad"
+            );
+
+            return;
+          }
+
+          this.youtubeVideoId =
+            id;
+
+          this.sourceType =
+            "youtube";
+
+          this.verifyYoutubeSource();
+
+          await this.trackPresence();
+
+          this.render();
+
+          this.toast(
+            "YouTube video ready ✓",
+            "good"
+          );
+        }
+      );
+
+    this.root
+      .querySelector(
         "#enter-watch"
       )
       ?.addEventListener(
@@ -3101,6 +3658,9 @@ class WatchTogetherApp {
 
     this.file =
       file;
+
+    this.sourceType =
+      "file";
 
     if (
       this.fileUrl
@@ -3405,6 +3965,10 @@ class WatchTogetherApp {
   }
 
     renderWatch() {
+    const isYoutube =
+      this.sourceType ===
+      "youtube";
+
     this.root.innerHTML = `
       <div class="wt-shell wt-watch">
 
@@ -3416,12 +3980,23 @@ class WatchTogetherApp {
 
             <div class="wt-video-wrap">
 
-              <video
-                class="wt-video"
-                id="movie-video"
-                playsinline
-                preload="metadata"
-              ></video>
+              ${
+                isYoutube
+                  ? `
+                    <div
+                      class="wt-video"
+                      id="youtube-player"
+                    ></div>
+                  `
+                  : `
+                    <video
+                      class="wt-video"
+                      id="movie-video"
+                      playsinline
+                      preload="metadata"
+                    ></video>
+                  `
+              }
 
               <div
                 class="wt-video-empty"
@@ -3432,13 +4007,21 @@ class WatchTogetherApp {
                     🎬
                   </span>
 
-                  Loading your local movie…
+                  ${
+                    isYoutube
+                      ? "Loading YouTube video…"
+                      : "Loading your local movie…"
+                  }
                 </div>
               </div>
 
               <div class="wt-player-overlay">
                 <span class="wt-local-note">
-                  🔒 Playing locally · only playback is synchronized
+                  ${
+                    isYoutube
+                      ? "▶ Streaming from YouTube · playback is synchronized"
+                      : "🔒 Playing locally · only playback is synchronized"
+                  }
                 </span>
               </div>
 
@@ -3483,7 +4066,10 @@ class WatchTogetherApp {
                   }
                 >
 
-                <span class="wt-time">
+                <span
+                  class="wt-time"
+                  id="total-time"
+                >
                   ${formatTime(
                     this.fileDuration
                   )}
@@ -3508,47 +4094,53 @@ class WatchTogetherApp {
                   aria-label="Volume"
                 >
 
-                <select
-                  class="wt-speed"
-                  id="audio-mode"
-                  aria-label="Movie audio mode"
-                  title="Stereo Compatibility mixes surround channels into stereo so music and effects are not lost"
-                >
-                  <option
-                    value="compat"
-                    ${
-                      this.movieAudioMode ===
-                      "compat"
-                        ? "selected"
-                        : ""
-                    }
-                  >
-                    🎧 Stereo
-                  </option>
+                ${
+                  isYoutube
+                    ? ""
+                    : `
+                      <select
+                        class="wt-speed"
+                        id="audio-mode"
+                        aria-label="Movie audio mode"
+                        title="Stereo Compatibility mixes surround channels into stereo so music and effects are not lost"
+                      >
+                        <option
+                          value="compat"
+                          ${
+                            this.movieAudioMode ===
+                            "compat"
+                              ? "selected"
+                              : ""
+                          }
+                        >
+                          🎧 Stereo
+                        </option>
 
-                  <option
-                    value="native"
-                    ${
-                      this.movieAudioMode ===
-                      "native"
-                        ? "selected"
-                        : ""
-                    }
-                  >
-                    🔊 Native
-                  </option>
-                </select>
+                        <option
+                          value="native"
+                          ${
+                            this.movieAudioMode ===
+                            "native"
+                              ? "selected"
+                              : ""
+                          }
+                        >
+                          🔊 Native
+                        </option>
+                      </select>
 
-                <select
-                  class="wt-speed"
-                  id="audio-track"
-                  aria-label="Audio language"
-                  title="Choose your personal movie audio language"
-                >
-                  <option value="">
-                    🔈 Audio
-                  </option>
-                </select>
+                      <select
+                        class="wt-speed"
+                        id="audio-track"
+                        aria-label="Audio language"
+                        title="Choose your personal movie audio language"
+                      >
+                        <option value="">
+                          🔈 Audio
+                        </option>
+                      </select>
+                    `
+                }
 
                 <select
                   class="wt-speed"
@@ -3770,33 +4362,46 @@ class WatchTogetherApp {
       ></div>
     `;
 
-    this.video =
-      this.root.querySelector(
-        "#movie-video"
-      );
+    if (
+      isYoutube
+    ) {
+      this.video =
+        new YoutubeMediaAdapter(
+          this.root.querySelector(
+            "#youtube-player"
+          ),
+          this.youtubeVideoId
+        );
 
-    this.video.src =
-      this.fileUrl;
+    } else {
+      this.video =
+        this.root.querySelector(
+          "#movie-video"
+        );
 
-    this.initializeMovieAudio()
-      .catch(
-        (error) => {
-          console.warn(
-            "Universal movie audio initialization failed",
-            error
-          );
+      this.video.src =
+        this.fileUrl;
 
-          this.setupMovieAudio()
-            .catch(
-              () => {}
+      this.initializeMovieAudio()
+        .catch(
+          (error) => {
+            console.warn(
+              "Universal movie audio initialization failed",
+              error
             );
 
-          this.toast(
-            "Advanced audio track switching could not start. Using browser audio.",
-            "bad"
-          );
-        }
-      );
+            this.setupMovieAudio()
+              .catch(
+                () => {}
+              );
+
+            this.toast(
+              "Advanced audio track switching could not start. Using browser audio.",
+              "bad"
+            );
+          }
+        );
+    }
 
     this.video.addEventListener(
       "loadedmetadata",
@@ -3820,6 +4425,20 @@ class WatchTogetherApp {
               this.video.duration ||
               this.fileDuration ||
               1
+            );
+        }
+
+        const totalTime =
+          this.root.querySelector(
+            "#total-time"
+          );
+
+        if (totalTime) {
+          totalTime.textContent =
+            formatTime(
+              this.video.duration ||
+              this.fileDuration ||
+              0
             );
         }
 
@@ -7540,9 +8159,15 @@ class WatchTogetherApp {
         drift
       );
 
+    const seekThreshold =
+      this.sourceType ===
+      "youtube"
+        ? 0.35
+        : 0.5;
+
     if (
       abs >
-        0.5 &&
+        seekThreshold &&
       Date.now() >
         this.seekCooldownUntil
     ) {
@@ -8279,6 +8904,25 @@ class WatchTogetherApp {
         }
       };
 
+    pc.onsignalingstatechange =
+      () => {
+        if (
+          pc.signalingState ===
+            "stable" &&
+          this.pendingOffers.has(
+            peerId
+          )
+        ) {
+          this.pendingOffers.delete(
+            peerId
+          );
+
+          this.makeOffer(
+            peerId
+          );
+        }
+      };
+
     return pc;
   }
 
@@ -8296,6 +8940,12 @@ class WatchTogetherApp {
       pc.signalingState !==
         "stable"
     ) {
+      if (pc) {
+        this.pendingOffers.add(
+          peerId
+        );
+      }
+
       return;
     }
 
@@ -9324,8 +9974,7 @@ class WatchTogetherApp {
               >
 
                 ${
-                  stream &&
-                  cameraOn
+                  stream
                     ? `
                       <video
                         id="peer-video-${esc(
@@ -9340,7 +9989,12 @@ class WatchTogetherApp {
                         }
                       ></video>
                     `
-                    : `
+                    : ""
+                }
+
+                ${
+                  !cameraOn
+                    ? `
                       <div class="wt-person-placeholder">
 
                         <div>
@@ -9361,6 +10015,7 @@ class WatchTogetherApp {
 
                       </div>
                     `
+                    : ""
                 }
 
                 <div class="wt-person-name">
@@ -9939,6 +10594,10 @@ class WatchTogetherApp {
       peerId
     );
 
+    this.pendingOffers.delete(
+      peerId
+    );
+
     if (
       this.phase ===
       "watch"
@@ -10050,6 +10709,10 @@ class WatchTogetherApp {
     if (
       goHome
     ) {
+      this.video
+        ?.destroy
+        ?.();
+
       this.cleanupMovieAudio();
 
       this.stopLocalMedia();
@@ -10196,6 +10859,10 @@ class WatchTogetherApp {
     await this.leaveRoom(
       false
     );
+
+    this.video
+      ?.destroy
+      ?.();
 
     this.cleanupMovieAudio();
 
