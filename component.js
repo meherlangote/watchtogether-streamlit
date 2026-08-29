@@ -779,13 +779,13 @@ function randomRoomCode() {
     ).join("")
   );
 }
-const CDN_SUPABASE = "https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/+esm";
-const CDN_HASH = "https://cdn.jsdelivr.net/npm/hash-wasm@4.12.0/+esm";
-const CDN_MEDIABUNNY = "https://cdn.jsdelivr.net/npm/mediabunny@1.55.3/dist/bundles/mediabunny.mjs";
-const CDN_MEDIABUNNY_AC3 = "https://cdn.jsdelivr.net/npm/@mediabunny/ac3@1.55.3/dist/bundles/mediabunny-ac3.js";
-const CDN_MEDIABUNNY_DTS = "https://cdn.jsdelivr.net/npm/@mediabunny/dts@1.55.3/dist/bundles/mediabunny-dts.js";
+// const CDN_SUPABASE = "https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/+esm";
+// const CDN_HASH = "https://cdn.jsdelivr.net/npm/hash-wasm@4.12.0/+esm";
+// const CDN_MEDIABUNNY = "https://cdn.jsdelivr.net/npm/mediabunny@1.55.3/dist/bundles/mediabunny.mjs";
+// const CDN_MEDIABUNNY_AC3 = "https://cdn.jsdelivr.net/npm/@mediabunny/ac3@1.55.3/dist/bundles/mediabunny-ac3.js";
+// const CDN_MEDIABUNNY_DTS = "https://cdn.jsdelivr.net/npm/@mediabunny/dts@1.55.3/dist/bundles/mediabunny-dts.js";
 
-const AUDIO_WORKLET_SOURCE = String.raw`
+// const AUDIO_WORKLET_SOURCE = String.raw`
 class WatchTogetherPcmProcessor extends AudioWorkletProcessor {
   constructor() {
     super();
