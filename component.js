@@ -1,61 +1,1565 @@
 const CDN_SUPABASE = "https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/+esm";
 const CDN_HASH = "https://cdn.jsdelivr.net/npm/hash-wasm@4.12.0/+esm";
-const CDN_MEDIABUNNY =
-  "https://cdn.jsdelivr.net/npm/mediabunny@1.55.3/dist/bundles/mediabunny.mjs";
+const CDN_MEDIABUNNY = "https://cdn.jsdelivr.net/npm/mediabunny@1.55.3/dist/bundles/mediabunny.mjs";
 const CDN_MEDIABUNNY_AC3 = "https://cdn.jsdelivr.net/npm/@mediabunny/ac3@1.55.3/dist/bundles/mediabunny-ac3.js";
 const CDN_MEDIABUNNY_DTS = "https://cdn.jsdelivr.net/npm/@mediabunny/dts@1.55.3/dist/bundles/mediabunny-dts.js";
 
-const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
-const clamp = (n, min, max) => Math.min(max, Math.max(min, n));
+const AUDIO_WORKLET_SOURCE = String.raw`
+class WatchTogetherPcmProcessor extends AudioWorkletProcessor {
+  constructor() {
+    super();
 
-const esc = (value = "") => String(value)
-  .replaceAll("&", "&amp;")
-  .replaceAll("<", "&lt;")
-  .replaceAll(">", "&gt;")
-  .replaceAll('"', "&quot;")
-  .replaceAll("'", "&#039;");
+    this.maxChannels = 8;
+    this.capacity = Math.ceil(sampleRate * 20);
+    this.ring = Array.from(
+      { length: this.maxChannels },
+      () => new Float32Array(this.capacity),
+    );
 
-function formatBytes(bytes) {
-  if (!Number.isFinite(bytes) || bytes <= 0) return "0 B";
+    this.sourceSampleRate = sampleRate;
+    this.inputChannels = 2;
+    this.writeFrame = 0;
+    this.readFrame = 0;
+    this.playbackRate = 1;
+    this.playing = false;
 
-  const units = ["B", "KB", "MB", "GB", "TB"];
+    this.gain = 0;
+    this.targetGain = 0;
+    this.lastSamples = new Float32Array(this.maxChannels);
 
-  const i = Math.min(
-    Math.floor(Math.log(bytes) / Math.log(1024)),
-    units.length - 1
-  );
+    this.underruns = 0;
+    this.wasUnderrun = false;
+    this.statsCounter = 0;
 
-  return `${(bytes / Math.pow(1024, i)).toFixed(i > 2 ? 2 : 1)} ${units[i]}`;
+    this.port.onmessage = (event) => {
+      const message = event.data || {};
+
+      if (message.type === "reset") {
+        this.reset(message);
+        return;
+      }
+
+      if (message.type === "push") {
+        this.push(message);
+        return;
+      }
+
+      if (message.type === "start") {
+        this.playing = true;
+        this.targetGain = 1;
+        return;
+      }
+
+      if (message.type === "pause") {
+        this.playing = false;
+        this.targetGain = 0;
+        return;
+      }
+
+      if (message.type === "rate") {
+        const rate = Number(message.rate);
+
+        if (Number.isFinite(rate)) {
+          this.playbackRate = Math.min(
+            4,
+            Math.max(0.25, rate)
+          );
+        }
+
+        return;
+      }
+
+      if (message.type === "seek") {
+        const frame = Number(
+          message.frame
+        );
+
+        if (Number.isFinite(frame)) {
+          const maxReadable =
+            Math.max(
+              0,
+              this.writeFrame - 2
+            );
+
+          this.readFrame =
+            Math.min(
+              maxReadable,
+              Math.max(0, frame)
+            );
+
+          this.gain = 0;
+
+          this.targetGain =
+            this.playing
+              ? 1
+              : 0;
+        }
+
+        return;
+      }
+
+      if (message.type === "clear") {
+        this.reset({
+          sourceSampleRate:
+            this.sourceSampleRate,
+
+          channelCount:
+            this.inputChannels,
+        });
+      }
+    };
+  }
+
+  reset(message = {}) {
+    const newRate =
+      Number(
+        message.sourceSampleRate
+      );
+
+    const newChannels =
+      Number(
+        message.channelCount
+      );
+
+    if (
+      Number.isFinite(newRate) &&
+      newRate > 0
+    ) {
+      this.sourceSampleRate =
+        newRate;
+    }
+
+    if (
+      Number.isFinite(newChannels) &&
+      newChannels > 0
+    ) {
+      this.inputChannels =
+        Math.min(
+          this.maxChannels,
+          Math.max(
+            1,
+            Math.floor(newChannels)
+          )
+        );
+    }
+
+    this.writeFrame = 0;
+    this.readFrame = 0;
+
+    this.playing = false;
+
+    this.gain = 0;
+    this.targetGain = 0;
+
+    this.lastSamples.fill(0);
+
+    this.underruns = 0;
+
+    this.wasUnderrun =
+      false;
+
+    for (
+      const channel
+      of this.ring
+    ) {
+      channel.fill(0);
+    }
+
+    this.sendStats(true);
+  }
+
+  push(message) {
+    const frames =
+      Math.max(
+        0,
+        Math.floor(
+          Number(
+            message.frames
+          ) || 0
+        )
+      );
+
+    const channelCount =
+      Math.min(
+        this.maxChannels,
+
+        Math.max(
+          1,
+          Math.floor(
+            Number(
+              message.channelCount
+            ) || 1
+          )
+        )
+      );
+
+    const incomingRate =
+      Number(
+        message.sourceSampleRate
+      );
+
+    if (
+      Number.isFinite(incomingRate) &&
+      incomingRate > 0
+    ) {
+      this.sourceSampleRate =
+        incomingRate;
+    }
+
+    this.inputChannels =
+      channelCount;
+
+    if (
+      !frames ||
+      !Array.isArray(
+        message.channels
+      )
+    ) {
+      return;
+    }
+
+    const unread =
+      Math.max(
+        0,
+        this.writeFrame -
+          Math.floor(
+            this.readFrame
+          )
+      );
+
+    const free =
+      Math.max(
+        0,
+        this.capacity -
+          unread -
+          4
+      );
+
+    const accepted =
+      Math.min(
+        frames,
+        free
+      );
+
+    if (
+      accepted <= 0
+    ) {
+      this.port.postMessage({
+        type:
+          "overflow",
+
+        bufferedFrames:
+          unread,
+      });
+
+      return;
+    }
+
+    const channels =
+      message.channels.map(
+        (buffer) =>
+          new Float32Array(
+            buffer
+          )
+      );
+
+    for (
+      let i = 0;
+      i < accepted;
+      i += 1
+    ) {
+      const ringIndex =
+        (
+          this.writeFrame +
+          i
+        ) %
+        this.capacity;
+
+      for (
+        let channel = 0;
+        channel <
+          this.maxChannels;
+        channel += 1
+      ) {
+        this.ring[
+          channel
+        ][ringIndex] =
+          channel <
+            channelCount &&
+          channels[channel]
+            ? channels[
+                channel
+              ][i] || 0
+            : 0;
+      }
+    }
+
+    this.writeFrame +=
+      accepted;
+
+    if (
+      accepted <
+      frames
+    ) {
+      this.port.postMessage({
+        type:
+          "overflow",
+
+        droppedFrames:
+          frames -
+          accepted,
+      });
+    }
+  }
+
+  sampleAt(
+    channel,
+    absoluteFrame
+  ) {
+    const floorFrame =
+      Math.floor(
+        absoluteFrame
+      );
+
+    const fraction =
+      absoluteFrame -
+      floorFrame;
+
+    const indexA =
+      (
+        (
+          floorFrame %
+          this.capacity
+        ) +
+        this.capacity
+      ) %
+      this.capacity;
+
+    const indexB =
+      (
+        (
+          (
+            floorFrame +
+            1
+          ) %
+          this.capacity
+        ) +
+        this.capacity
+      ) %
+      this.capacity;
+
+    const a =
+      this.ring[
+        channel
+      ][indexA] || 0;
+
+    const b =
+      this.ring[
+        channel
+      ][indexB] || 0;
+
+    return (
+      a +
+      (
+        b -
+        a
+      ) *
+        fraction
+    );
+  }
+
+  sendStats(
+    force = false
+  ) {
+    if (!force) {
+      this.statsCounter +=
+        1;
+
+      if (
+        this.statsCounter <
+        32
+      ) {
+        return;
+      }
+
+      this.statsCounter =
+        0;
+    }
+
+    const bufferedFrames =
+      Math.max(
+        0,
+        this.writeFrame -
+          this.readFrame
+      );
+
+    this.port.postMessage({
+      type:
+        "stats",
+
+      readFrame:
+        this.readFrame,
+
+      writeFrame:
+        this.writeFrame,
+
+      bufferedFrames,
+
+      bufferedSeconds:
+        bufferedFrames /
+        Math.max(
+          1,
+          this.sourceSampleRate
+        ),
+
+      sourceSampleRate:
+        this.sourceSampleRate,
+
+      channelCount:
+        this.inputChannels,
+
+      underruns:
+        this.underruns,
+
+      playing:
+        this.playing,
+    });
+  }
+
+  process(
+    inputs,
+    outputs
+  ) {
+    const output =
+      outputs[0];
+
+    if (
+      !output ||
+      !output.length
+    ) {
+      return true;
+    }
+
+    const frames =
+      output[0].length;
+
+    const step =
+      (
+        this.sourceSampleRate /
+        sampleRate
+      ) *
+      Math.min(
+        4,
+        Math.max(
+          0.25,
+          this.playbackRate
+        )
+      );
+
+    let underrunThisQuantum =
+      false;
+
+    for (
+      let i = 0;
+      i < frames;
+      i += 1
+    ) {
+      const available =
+        this.writeFrame -
+        this.readFrame;
+
+      const canRead =
+        this.playing &&
+        available >
+          step +
+            2;
+
+      if (canRead) {
+        this.targetGain =
+          1;
+
+        /*
+         * Short fade-in after
+         * start/seek/underrun.
+         */
+
+        this.gain =
+          Math.min(
+            1,
+            this.gain +
+              1 /
+                256
+          );
+
+        for (
+          let channel = 0;
+          channel <
+            output.length;
+          channel += 1
+        ) {
+          const sample =
+            channel <
+            this.inputChannels
+              ? this.sampleAt(
+                  channel,
+                  this.readFrame
+                )
+              : 0;
+
+          output[
+            channel
+          ][i] =
+            sample *
+            this.gain;
+
+          this.lastSamples[
+            channel
+          ] =
+            sample;
+        }
+
+        this.readFrame +=
+          step;
+
+        this.wasUnderrun =
+          false;
+
+      } else {
+        if (
+          this.playing
+        ) {
+          underrunThisQuantum =
+            true;
+        }
+
+        this.targetGain =
+          0;
+
+        this.gain =
+          Math.max(
+            0,
+            this.gain -
+              1 /
+                256
+          );
+
+        for (
+          let channel = 0;
+          channel <
+            output.length;
+          channel += 1
+        ) {
+          output[
+            channel
+          ][i] =
+            this.lastSamples[
+              channel
+            ] *
+            this.gain;
+        }
+      }
+    }
+
+    if (
+      underrunThisQuantum &&
+      !this.wasUnderrun
+    ) {
+      this.underruns +=
+        1;
+
+      this.wasUnderrun =
+        true;
+
+      this.port.postMessage({
+        type:
+          "underrun",
+
+        underruns:
+          this.underruns,
+      });
+    }
+
+    this.sendStats(
+      false
+    );
+
+    return true;
+  }
 }
 
-function formatTime(value) {
-  const seconds = Math.max(
-    0,
-    Math.floor(Number(value) || 0)
+registerProcessor(
+  "watchtogether-pcm-player",
+  WatchTogetherPcmProcessor
+);
+`;
+
+const sleep = (ms) =>
+  new Promise(
+    (resolve) =>
+      setTimeout(
+        resolve,
+        ms
+      )
   );
 
-  const h = Math.floor(seconds / 3600);
-  const m = Math.floor((seconds % 3600) / 60);
-  const s = seconds % 60;
+const clamp = (
+  n,
+  min,
+  max
+) =>
+  Math.min(
+    max,
+    Math.max(
+      min,
+      n
+    )
+  );
+
+const esc = (
+  value = ""
+) =>
+  String(value)
+    .replaceAll(
+      "&",
+      "&amp;"
+    )
+    .replaceAll(
+      "<",
+      "&lt;"
+    )
+    .replaceAll(
+      ">",
+      "&gt;"
+    )
+    .replaceAll(
+      '"',
+      "&quot;"
+    )
+    .replaceAll(
+      "'",
+      "&#039;"
+    );
+
+function formatBytes(
+  bytes
+) {
+  if (
+    !Number.isFinite(
+      bytes
+    ) ||
+    bytes <= 0
+  ) {
+    return "0 B";
+  }
+
+  const units = [
+    "B",
+    "KB",
+    "MB",
+    "GB",
+    "TB",
+  ];
+
+  const i =
+    Math.min(
+      Math.floor(
+        Math.log(
+          bytes
+        ) /
+          Math.log(
+            1024
+          )
+      ),
+      units.length -
+        1
+    );
+
+  return `${
+    (
+      bytes /
+      Math.pow(
+        1024,
+        i
+      )
+    ).toFixed(
+      i > 2
+        ? 2
+        : 1
+    )
+  } ${units[i]}`;
+}
+
+function formatTime(
+  value
+) {
+  const seconds =
+    Math.max(
+      0,
+      Math.floor(
+        Number(
+          value
+        ) || 0
+      )
+    );
+
+  const h =
+    Math.floor(
+      seconds /
+        3600
+    );
+
+  const m =
+    Math.floor(
+      (
+        seconds %
+        3600
+      ) /
+        60
+    );
+
+  const s =
+    seconds %
+    60;
 
   return h > 0
-    ? `${String(h).padStart(2, "0")}:${String(m).padStart(2, "0")}:${String(s).padStart(2, "0")}`
-    : `${String(m).padStart(2, "0")}:${String(s).padStart(2, "0")}`;
+    ? `${
+        String(h)
+          .padStart(
+            2,
+            "0"
+          )
+      }:${
+        String(m)
+          .padStart(
+            2,
+            "0"
+          )
+      }:${
+        String(s)
+          .padStart(
+            2,
+            "0"
+          )
+      }`
+    : `${
+        String(m)
+          .padStart(
+            2,
+            "0"
+          )
+      }:${
+        String(s)
+          .padStart(
+            2,
+            "0"
+          )
+      }`;
 }
 
 function randomRoomCode() {
-  const alphabet = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
+  const alphabet =
+    "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
 
-  const bytes = crypto.getRandomValues(
-    new Uint8Array(6)
+  const bytes =
+    crypto.getRandomValues(
+      new Uint8Array(
+        6
+      )
+    );
+
+  return (
+    "WATCH-" +
+    Array.from(
+      bytes,
+      (b) =>
+        alphabet[
+          b %
+            alphabet.length
+        ]
+    ).join("")
   );
+}
+const CDN_SUPABASE = "https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/+esm";
+const CDN_HASH = "https://cdn.jsdelivr.net/npm/hash-wasm@4.12.0/+esm";
+const CDN_MEDIABUNNY = "https://cdn.jsdelivr.net/npm/mediabunny@1.55.3/dist/bundles/mediabunny.mjs";
+const CDN_MEDIABUNNY_AC3 = "https://cdn.jsdelivr.net/npm/@mediabunny/ac3@1.55.3/dist/bundles/mediabunny-ac3.js";
+const CDN_MEDIABUNNY_DTS = "https://cdn.jsdelivr.net/npm/@mediabunny/dts@1.55.3/dist/bundles/mediabunny-dts.js";
 
-  return "WATCH-" + Array.from(
-    bytes,
-    (b) => alphabet[b % alphabet.length]
-  ).join("");
+const AUDIO_WORKLET_SOURCE = String.raw`
+class WatchTogetherPcmProcessor extends AudioWorkletProcessor {
+  constructor() {
+    super();
+
+    this.maxChannels = 8;
+    this.capacity = Math.ceil(sampleRate * 20);
+    this.ring = Array.from(
+      { length: this.maxChannels },
+      () => new Float32Array(this.capacity),
+    );
+
+    this.sourceSampleRate = sampleRate;
+    this.inputChannels = 2;
+    this.writeFrame = 0;
+    this.readFrame = 0;
+    this.playbackRate = 1;
+    this.playing = false;
+
+    this.gain = 0;
+    this.targetGain = 0;
+    this.lastSamples = new Float32Array(this.maxChannels);
+
+    this.underruns = 0;
+    this.wasUnderrun = false;
+    this.statsCounter = 0;
+
+    this.port.onmessage = (event) => {
+      const message = event.data || {};
+
+      if (message.type === "reset") {
+        this.reset(message);
+        return;
+      }
+
+      if (message.type === "push") {
+        this.push(message);
+        return;
+      }
+
+      if (message.type === "start") {
+        this.playing = true;
+        this.targetGain = 1;
+        return;
+      }
+
+      if (message.type === "pause") {
+        this.playing = false;
+        this.targetGain = 0;
+        return;
+      }
+
+      if (message.type === "rate") {
+        const rate = Number(message.rate);
+
+        if (Number.isFinite(rate)) {
+          this.playbackRate = Math.min(
+            4,
+            Math.max(0.25, rate)
+          );
+        }
+
+        return;
+      }
+
+      if (message.type === "seek") {
+        const frame = Number(
+          message.frame
+        );
+
+        if (Number.isFinite(frame)) {
+          const maxReadable =
+            Math.max(
+              0,
+              this.writeFrame - 2
+            );
+
+          this.readFrame =
+            Math.min(
+              maxReadable,
+              Math.max(0, frame)
+            );
+
+          this.gain = 0;
+
+          this.targetGain =
+            this.playing
+              ? 1
+              : 0;
+        }
+
+        return;
+      }
+
+      if (message.type === "clear") {
+        this.reset({
+          sourceSampleRate:
+            this.sourceSampleRate,
+
+          channelCount:
+            this.inputChannels,
+        });
+      }
+    };
+  }
+
+  reset(message = {}) {
+    const newRate =
+      Number(
+        message.sourceSampleRate
+      );
+
+    const newChannels =
+      Number(
+        message.channelCount
+      );
+
+    if (
+      Number.isFinite(newRate) &&
+      newRate > 0
+    ) {
+      this.sourceSampleRate =
+        newRate;
+    }
+
+    if (
+      Number.isFinite(newChannels) &&
+      newChannels > 0
+    ) {
+      this.inputChannels =
+        Math.min(
+          this.maxChannels,
+          Math.max(
+            1,
+            Math.floor(newChannels)
+          )
+        );
+    }
+
+    this.writeFrame = 0;
+    this.readFrame = 0;
+
+    this.playing = false;
+
+    this.gain = 0;
+    this.targetGain = 0;
+
+    this.lastSamples.fill(0);
+
+    this.underruns = 0;
+
+    this.wasUnderrun =
+      false;
+
+    for (
+      const channel
+      of this.ring
+    ) {
+      channel.fill(0);
+    }
+
+    this.sendStats(true);
+  }
+
+  push(message) {
+    const frames =
+      Math.max(
+        0,
+        Math.floor(
+          Number(
+            message.frames
+          ) || 0
+        )
+      );
+
+    const channelCount =
+      Math.min(
+        this.maxChannels,
+
+        Math.max(
+          1,
+          Math.floor(
+            Number(
+              message.channelCount
+            ) || 1
+          )
+        )
+      );
+
+    const incomingRate =
+      Number(
+        message.sourceSampleRate
+      );
+
+    if (
+      Number.isFinite(incomingRate) &&
+      incomingRate > 0
+    ) {
+      this.sourceSampleRate =
+        incomingRate;
+    }
+
+    this.inputChannels =
+      channelCount;
+
+    if (
+      !frames ||
+      !Array.isArray(
+        message.channels
+      )
+    ) {
+      return;
+    }
+
+    const unread =
+      Math.max(
+        0,
+        this.writeFrame -
+          Math.floor(
+            this.readFrame
+          )
+      );
+
+    const free =
+      Math.max(
+        0,
+        this.capacity -
+          unread -
+          4
+      );
+
+    const accepted =
+      Math.min(
+        frames,
+        free
+      );
+
+    if (
+      accepted <= 0
+    ) {
+      this.port.postMessage({
+        type:
+          "overflow",
+
+        bufferedFrames:
+          unread,
+      });
+
+      return;
+    }
+
+    const channels =
+      message.channels.map(
+        (buffer) =>
+          new Float32Array(
+            buffer
+          )
+      );
+
+    for (
+      let i = 0;
+      i < accepted;
+      i += 1
+    ) {
+      const ringIndex =
+        (
+          this.writeFrame +
+          i
+        ) %
+        this.capacity;
+
+      for (
+        let channel = 0;
+        channel <
+          this.maxChannels;
+        channel += 1
+      ) {
+        this.ring[
+          channel
+        ][ringIndex] =
+          channel <
+            channelCount &&
+          channels[channel]
+            ? channels[
+                channel
+              ][i] || 0
+            : 0;
+      }
+    }
+
+    this.writeFrame +=
+      accepted;
+
+    if (
+      accepted <
+      frames
+    ) {
+      this.port.postMessage({
+        type:
+          "overflow",
+
+        droppedFrames:
+          frames -
+          accepted,
+      });
+    }
+  }
+
+  sampleAt(
+    channel,
+    absoluteFrame
+  ) {
+    const floorFrame =
+      Math.floor(
+        absoluteFrame
+      );
+
+    const fraction =
+      absoluteFrame -
+      floorFrame;
+
+    const indexA =
+      (
+        (
+          floorFrame %
+          this.capacity
+        ) +
+        this.capacity
+      ) %
+      this.capacity;
+
+    const indexB =
+      (
+        (
+          (
+            floorFrame +
+            1
+          ) %
+          this.capacity
+        ) +
+        this.capacity
+      ) %
+      this.capacity;
+
+    const a =
+      this.ring[
+        channel
+      ][indexA] || 0;
+
+    const b =
+      this.ring[
+        channel
+      ][indexB] || 0;
+
+    return (
+      a +
+      (
+        b -
+        a
+      ) *
+        fraction
+    );
+  }
+
+  sendStats(
+    force = false
+  ) {
+    if (!force) {
+      this.statsCounter +=
+        1;
+
+      if (
+        this.statsCounter <
+        32
+      ) {
+        return;
+      }
+
+      this.statsCounter =
+        0;
+    }
+
+    const bufferedFrames =
+      Math.max(
+        0,
+        this.writeFrame -
+          this.readFrame
+      );
+
+    this.port.postMessage({
+      type:
+        "stats",
+
+      readFrame:
+        this.readFrame,
+
+      writeFrame:
+        this.writeFrame,
+
+      bufferedFrames,
+
+      bufferedSeconds:
+        bufferedFrames /
+        Math.max(
+          1,
+          this.sourceSampleRate
+        ),
+
+      sourceSampleRate:
+        this.sourceSampleRate,
+
+      channelCount:
+        this.inputChannels,
+
+      underruns:
+        this.underruns,
+
+      playing:
+        this.playing,
+    });
+  }
+
+  process(
+    inputs,
+    outputs
+  ) {
+    const output =
+      outputs[0];
+
+    if (
+      !output ||
+      !output.length
+    ) {
+      return true;
+    }
+
+    const frames =
+      output[0].length;
+
+    const step =
+      (
+        this.sourceSampleRate /
+        sampleRate
+      ) *
+      Math.min(
+        4,
+        Math.max(
+          0.25,
+          this.playbackRate
+        )
+      );
+
+    let underrunThisQuantum =
+      false;
+
+    for (
+      let i = 0;
+      i < frames;
+      i += 1
+    ) {
+      const available =
+        this.writeFrame -
+        this.readFrame;
+
+      const canRead =
+        this.playing &&
+        available >
+          step +
+            2;
+
+      if (canRead) {
+        this.targetGain =
+          1;
+
+        /*
+         * Short fade-in after
+         * start/seek/underrun.
+         */
+
+        this.gain =
+          Math.min(
+            1,
+            this.gain +
+              1 /
+                256
+          );
+
+        for (
+          let channel = 0;
+          channel <
+            output.length;
+          channel += 1
+        ) {
+          const sample =
+            channel <
+            this.inputChannels
+              ? this.sampleAt(
+                  channel,
+                  this.readFrame
+                )
+              : 0;
+
+          output[
+            channel
+          ][i] =
+            sample *
+            this.gain;
+
+          this.lastSamples[
+            channel
+          ] =
+            sample;
+        }
+
+        this.readFrame +=
+          step;
+
+        this.wasUnderrun =
+          false;
+
+      } else {
+        if (
+          this.playing
+        ) {
+          underrunThisQuantum =
+            true;
+        }
+
+        this.targetGain =
+          0;
+
+        this.gain =
+          Math.max(
+            0,
+            this.gain -
+              1 /
+                256
+          );
+
+        for (
+          let channel = 0;
+          channel <
+            output.length;
+          channel += 1
+        ) {
+          output[
+            channel
+          ][i] =
+            this.lastSamples[
+              channel
+            ] *
+            this.gain;
+        }
+      }
+    }
+
+    if (
+      underrunThisQuantum &&
+      !this.wasUnderrun
+    ) {
+      this.underruns +=
+        1;
+
+      this.wasUnderrun =
+        true;
+
+      this.port.postMessage({
+        type:
+          "underrun",
+
+        underruns:
+          this.underruns,
+      });
+    }
+
+    this.sendStats(
+      false
+    );
+
+    return true;
+  }
 }
 
+registerProcessor(
+  "watchtogether-pcm-player",
+  WatchTogetherPcmProcessor
+);
+`;
+
+const sleep = (ms) =>
+  new Promise(
+    (resolve) =>
+      setTimeout(
+        resolve,
+        ms
+      )
+  );
+
+const clamp = (
+  n,
+  min,
+  max
+) =>
+  Math.min(
+    max,
+    Math.max(
+      min,
+      n
+    )
+  );
+
+const esc = (
+  value = ""
+) =>
+  String(value)
+    .replaceAll(
+      "&",
+      "&amp;"
+    )
+    .replaceAll(
+      "<",
+      "&lt;"
+    )
+    .replaceAll(
+      ">",
+      "&gt;"
+    )
+    .replaceAll(
+      '"',
+      "&quot;"
+    )
+    .replaceAll(
+      "'",
+      "&#039;"
+    );
+
+function formatBytes(
+  bytes
+) {
+  if (
+    !Number.isFinite(
+      bytes
+    ) ||
+    bytes <= 0
+  ) {
+    return "0 B";
+  }
+
+  const units = [
+    "B",
+    "KB",
+    "MB",
+    "GB",
+    "TB",
+  ];
+
+  const i =
+    Math.min(
+      Math.floor(
+        Math.log(
+          bytes
+        ) /
+          Math.log(
+            1024
+          )
+      ),
+      units.length -
+        1
+    );
+
+  return `${
+    (
+      bytes /
+      Math.pow(
+        1024,
+        i
+      )
+    ).toFixed(
+      i > 2
+        ? 2
+        : 1
+    )
+  } ${units[i]}`;
+}
+
+function formatTime(
+  value
+) {
+  const seconds =
+    Math.max(
+      0,
+      Math.floor(
+        Number(
+          value
+        ) || 0
+      )
+    );
+
+  const h =
+    Math.floor(
+      seconds /
+        3600
+    );
+
+  const m =
+    Math.floor(
+      (
+        seconds %
+        3600
+      ) /
+        60
+    );
+
+  const s =
+    seconds %
+    60;
+
+  return h > 0
+    ? `${
+        String(h)
+          .padStart(
+            2,
+            "0"
+          )
+      }:${
+        String(m)
+          .padStart(
+            2,
+            "0"
+          )
+      }:${
+        String(s)
+          .padStart(
+            2,
+            "0"
+          )
+      }`
+    : `${
+        String(m)
+          .padStart(
+            2,
+            "0"
+          )
+      }:${
+        String(s)
+          .padStart(
+            2,
+            "0"
+          )
+      }`;
+}
+
+function randomRoomCode() {
+  const alphabet =
+    "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
+
+  const bytes =
+    crypto.getRandomValues(
+      new Uint8Array(
+        6
+      )
+    );
+
+  return (
+    "WATCH-" +
+    Array.from(
+      bytes,
+      (b) =>
+        alphabet[
+          b %
+            alphabet.length
+        ]
+    ).join("")
+  );
+}
 function safeRoomCode(value) {
   const code = String(value || "")
     .trim()
@@ -79,185 +1583,269 @@ class WatchTogetherApp {
     const browserRoom = (() => {
       try {
         return safeRoomCode(
-          new URL(window.location.href)
+          new URL(
+            window.location.href
+          )
             .searchParams
-            .get("room") || ""
+            .get("room") ||
+            ""
         );
       } catch {
         return "";
       }
     })();
 
-    this.phase = browserRoom
-      ? "join"
-      : "landing";
+    this.phase =
+      browserRoom
+        ? "join"
+        : "landing";
 
-    this.peerId = crypto.randomUUID();
+    this.peerId =
+      crypto.randomUUID();
 
     this.name = "";
-    this.roomCode = browserRoom;
+    this.roomCode =
+      browserRoom;
 
-    this.creating = false;
-    this.connected = false;
+    this.creating =
+      false;
 
-    this.connectionStatus = "offline";
+    this.connected =
+      false;
 
-    this.participants = new Map();
-    this.previousParticipantIds = new Set();
+    this.connectionStatus =
+      "offline";
 
-    this.hostId = null;
-    this.isHost = false;
+    this.participants =
+      new Map();
 
-    this.joinedAt = Date.now();
+    this.previousParticipantIds =
+      new Set();
 
-    this.locked = false;
-    this.lockedAt = 0;
+    this.hostId =
+      null;
 
-    /*
-     * MOVIE FILE
-     */
+    this.isHost =
+      false;
 
-    this.file = null;
-    this.fileUrl = "";
-    this.fileHash = "";
-    this.fileDuration = 0;
+    this.joinedAt =
+      Date.now();
 
-    this.hashProgress = 0;
-    this.hashing = false;
+    this.locked =
+      false;
 
-    this.verified = false;
-    this.verifyMessage = "";
+    this.lockedAt =
+      0;
 
-    /*
-     * CAMERA / MICROPHONE
-     */
+    this.file =
+      null;
 
-    this.localStream = null;
+    this.fileUrl =
+      "";
 
-    this.microphoneDevices = [];
-    this.micDeviceId = "";
+    this.fileHash =
+      "";
 
-    this.remoteStreams = new Map();
+    this.fileDuration =
+      0;
 
-    this.pcs = new Map();
-    this.iceQueues = new Map();
+    this.hashProgress =
+      0;
 
-    this.micEnabled = false;
-    this.camEnabled = false;
+    this.hashing =
+      false;
 
-    /*
-     * CHAT / SYNC
-     */
+    this.verified =
+      false;
 
-    this.chat = [];
+    this.verifyMessage =
+      "";
 
-    this.authoritative = null;
+    this.localStream =
+      null;
 
-    this.revision = 0;
-    this.lastAppliedRevision = -1;
+    this.microphoneDevices =
+      [];
 
-    this.clockSamples = [];
+    this.micDeviceId =
+      "";
 
-    this.clockOffset = 0;
-    this.clockRtt = null;
+    this.remoteStreams =
+      new Map();
 
-    this.seekCooldownUntil = 0;
+    this.pcs =
+      new Map();
 
-    this.driftMs = 0;
-    this.syncLabel = "Waiting for playback";
+    this.iceQueues =
+      new Map();
 
-    this.syncTimer = null;
-    this.uiTimer = null;
-    this.clockTimer = null;
+    this.micEnabled =
+      false;
 
-    this.reconnectTimer = null;
+    this.camEnabled =
+      false;
 
-    /*
-     * Prevent reconnect after intentional Leave / End Room.
-     */
+    this.chat =
+      [];
 
-    this.intentionalDisconnect = false;
+    this.authoritative =
+      null;
 
-    this.destroyed = false;
+    this.revision =
+      0;
 
-    /*
-     * VIDEO
-     */
+    this.lastAppliedRevision =
+      -1;
 
-    this.video = null;
+    this.clockSamples =
+      [];
 
-    /*
-     * AUDIO LANGUAGE
-     */
+    this.clockOffset =
+      0;
 
-    this.selectedAudioTrackIndex = 0;
+    this.clockRtt =
+      null;
 
-    /*
-     * MEDIABUNNY UNIVERSAL LOCAL AUDIO
-     *
-     * This reads the selected browser File directly.
-     *
-     * Movie bytes DO NOT go to:
-     *
-     * - Streamlit
-     * - Supabase
-     * - any movie upload API
-     */
+    this.seekCooldownUntil =
+      0;
 
-    this.mediaBunny = null;
-    this.mediaInput = null;
+    this.driftMs =
+      0;
 
-    this.mediaAudioTracks = [];
-    this.mediaAudioTrackInfo = [];
+    this.syncLabel =
+      "Waiting for playback";
 
-    this.mediaAudioInitPromise = null;
+    this.syncTimer =
+      null;
 
-    this.mediaAudioReady = false;
-    this.mediaAudioError = null;
+    this.uiTimer =
+      null;
 
-    /*
-     * CUSTOM AUDIO PLAYBACK
-     *
-     * Used for:
-     *
-     * - MKV Hindi / English switching
-     * - AC-3
-     * - E-AC-3
-     * - DTS
-     * - browser-unavailable embedded tracks
-     */
+    this.clockTimer =
+      null;
 
-    this.customAudioActive = false;
+    this.reconnectTimer =
+      null;
 
-    this.customAudioSink = null;
-    this.customAudioInput = null;
+    this.intentionalDisconnect =
+      false;
 
-    this.customAudioSources = new Set();
+    this.destroyed =
+      false;
 
-    this.customAudioGeneration = 0;
+    this.video =
+      null;
 
-    this.customAudioScheduleTimer = null;
-    this.customAudioRestartTimer = null;
-
-    this.customAudioScheduledUntil = 0;
-
-    this.customAudioScheduling = false;
+    this.selectedAudioTrackIndex =
+      0;
 
     /*
-     * WEB AUDIO
+     * Mediabunny reads the local File
+     * directly through BlobSource.
      */
 
-    this.audioContext = null;
+    this.mediaBunny =
+      null;
 
-    this.movieAudioSource = null;
+    this.mediaInput =
+      null;
 
-    this.movieAudioNodes = [];
+    this.mediaAudioTracks =
+      [];
 
-    this.movieAudioMaster = null;
+    this.mediaAudioTrackInfo =
+      [];
 
-    this.movieAudioMode = "compat";
+    this.mediaAudioInitPromise =
+      null;
 
-    this.movieVolume = 1;
+    this.mediaAudioReady =
+      false;
+
+    this.mediaAudioError =
+      null;
+
+    /*
+     * Continuous custom audio engine.
+     */
+
+    this.customAudioActive =
+      false;
+
+    this.customAudioSink =
+      null;
+
+    this.customAudioInput =
+      null;
+
+    this.customAudioNode =
+      null;
+
+    this.customAudioWorkletPromise =
+      null;
+
+    this.customAudioGeneration =
+      0;
+
+    this.customAudioFillTimer =
+      null;
+
+    this.customAudioRestartTimer =
+      null;
+
+    this.customAudioDecoding =
+      false;
+
+    this.customAudioPrimed =
+      false;
+
+    this.customAudioDecodeCursor =
+      0;
+
+    this.customAudioBaseMedia =
+      0;
+
+    this.customAudioFramesPushed =
+      0;
+
+    this.customAudioReadFrame =
+      0;
+
+    this.customAudioWriteFrame =
+      0;
+
+    this.customAudioSourceSampleRate =
+      48000;
+
+    this.customAudioChannelCount =
+      2;
+
+    this.customAudioBufferedSeconds =
+      0;
+
+    this.customAudioUnderruns =
+      0;
+
+    this.customAudioLastResyncAt =
+      0;
+
+    this.audioContext =
+      null;
+
+    this.movieAudioSource =
+      null;
+
+    this.movieAudioNodes =
+      [];
+
+    this.movieAudioMaster =
+      null;
+
+    this.movieAudioMode =
+      "compat";
+
+    this.movieVolume =
+      1;
   }
 
   async init() {
@@ -269,28 +1857,57 @@ class WatchTogetherApp {
       const [
         supabaseModule,
         hashModule,
-      ] = await Promise.all([
-        import(CDN_SUPABASE),
-        import(CDN_HASH),
-      ]);
+      ] =
+        await Promise.all([
+          import(
+            CDN_SUPABASE
+          ),
 
-      this.hashWasm = hashModule;
+          import(
+            CDN_HASH
+          ),
+        ]);
+
+      this.hashWasm =
+        hashModule;
 
       this.supabase =
         supabaseModule.createClient(
-          this.config.supabaseUrl,
-          this.config.supabaseKey,
+          this.config
+            .supabaseUrl,
+
+          this.config
+            .supabaseKey,
+
           {
             auth: {
-              persistSession: false,
-              autoRefreshToken: false,
-              detectSessionInUrl: false,
+              persistSession:
+                false,
+
+              autoRefreshToken:
+                false,
+
+              detectSessionInUrl:
+                false,
             },
 
             realtime: {
               params: {
-                eventsPerSecond: 20,
+                eventsPerSecond:
+                  20,
               },
+
+              worker:
+                true,
+
+              heartbeatIntervalMs:
+                15000,
+
+              heartbeatCallback:
+                (status) =>
+                  this.onRealtimeHeartbeat(
+                    status
+                  ),
             },
           }
         );
@@ -318,20 +1935,23 @@ class WatchTogetherApp {
     try {
       this.config.roomFromUrl =
         safeRoomCode(
-          new URL(window.location.href)
+          new URL(
+            window.location.href
+          )
             .searchParams
-            .get("room") || ""
+            .get("room") ||
+            ""
         );
 
     } catch {
-      this.config.roomFromUrl = "";
+      this.config.roomFromUrl =
+        "";
     }
   }
 
   renderLoading(text) {
     this.root.innerHTML = `
       <div class="wt-loading">
-
         <div class="wt-logo-mark">
           ▶
         </div>
@@ -345,7 +1965,6 @@ class WatchTogetherApp {
             ${esc(text)}
           </span>
         </div>
-
       </div>
     `;
   }
@@ -353,9 +1972,7 @@ class WatchTogetherApp {
   renderFatal(text) {
     this.root.innerHTML = `
       <div class="wt-shell">
-
         <div class="wt-stage">
-
           <div class="wt-modal-card wt-center">
 
             <div class="wt-file-icon">
@@ -378,30 +1995,33 @@ class WatchTogetherApp {
             </button>
 
           </div>
-
         </div>
-
       </div>
     `;
 
     this.root
-      .querySelector("#fatal-reload")
+      .querySelector(
+        "#fatal-reload"
+      )
       ?.addEventListener(
         "click",
-        () => location.reload()
+        () =>
+          location.reload()
       );
   }
 
   topbar() {
     const conn =
-      this.connectionStatus === "connected"
+      this.connectionStatus ===
+      "connected"
         ? `
           <span class="wt-pill">
             <i class="wt-dot"></i>
             Connected
           </span>
         `
-        : this.connectionStatus === "reconnecting"
+        : this.connectionStatus ===
+          "reconnecting"
           ? `
             <span class="wt-pill">
               <i class="wt-dot yellow"></i>
@@ -421,7 +2041,9 @@ class WatchTogetherApp {
           <span class="wt-pill room-pill">
             Room&nbsp;
             <strong>
-              ${esc(this.roomCode)}
+              ${esc(
+                this.roomCode
+              )}
             </strong>
           </span>
         `
@@ -431,7 +2053,6 @@ class WatchTogetherApp {
       <header class="wt-topbar">
 
         <div class="wt-brand">
-
           <div class="wt-logo-mark">
             ▶
           </div>
@@ -439,11 +2060,9 @@ class WatchTogetherApp {
           <span>
             WatchTogether
           </span>
-
         </div>
 
         <div class="wt-top-actions">
-
           ${room}
 
           ${
@@ -451,7 +2070,6 @@ class WatchTogetherApp {
               ? conn
               : ""
           }
-
         </div>
 
       </header>
@@ -459,35 +2077,58 @@ class WatchTogetherApp {
   }
 
   render() {
-    if (this.destroyed) {
+    if (
+      this.destroyed
+    ) {
       return;
     }
 
-    if (this.phase === "landing") {
+    if (
+      this.phase ===
+      "landing"
+    ) {
       return this.renderLanding();
     }
 
-    if (this.phase === "create") {
+    if (
+      this.phase ===
+      "create"
+    ) {
       return this.renderCreate();
     }
 
-    if (this.phase === "join") {
+    if (
+      this.phase ===
+      "join"
+    ) {
       return this.renderJoin();
     }
 
-    if (this.phase === "connecting") {
+    if (
+      this.phase ===
+      "connecting"
+    ) {
       return this.renderConnecting();
     }
 
-    if (this.phase === "lobby") {
+    if (
+      this.phase ===
+      "lobby"
+    ) {
       return this.renderLobby();
     }
 
-    if (this.phase === "movie") {
+    if (
+      this.phase ===
+      "movie"
+    ) {
       return this.renderMovieSelect();
     }
 
-    if (this.phase === "watch") {
+    if (
+      this.phase ===
+      "watch"
+    ) {
       return this.renderWatch();
     }
   }
@@ -541,7 +2182,6 @@ class WatchTogetherApp {
 
             <div class="wt-privacy">
               🛡️
-
               <span>
                 No movie upload.
                 We only synchronize playback,
@@ -563,7 +2203,6 @@ class WatchTogetherApp {
             </div>
 
             <div class="wt-mini-row">
-
               <div class="wt-mini-face">
                 👑 You
               </div>
@@ -575,7 +2214,6 @@ class WatchTogetherApp {
               <div class="wt-mini-face">
                 🎤 Friend
               </div>
-
             </div>
 
           </div>
@@ -585,7 +2223,6 @@ class WatchTogetherApp {
         <section class="wt-features">
 
           <div class="wt-feature">
-
             <div class="icon">
               🎬
             </div>
@@ -597,11 +2234,9 @@ class WatchTogetherApp {
             <span>
               Your movie stays on your device.
             </span>
-
           </div>
 
           <div class="wt-feature">
-
             <div class="icon">
               ⚡
             </div>
@@ -613,11 +2248,9 @@ class WatchTogetherApp {
             <span>
               Play, pause, seek and drift correction.
             </span>
-
           </div>
 
           <div class="wt-feature">
-
             <div class="icon">
               📹
             </div>
@@ -629,11 +2262,9 @@ class WatchTogetherApp {
             <span>
               Peer-to-peer camera and microphone.
             </span>
-
           </div>
 
           <div class="wt-feature">
-
             <div class="icon">
               💬
             </div>
@@ -645,11 +2276,9 @@ class WatchTogetherApp {
             <span>
               Talk without leaving the movie.
             </span>
-
           </div>
 
           <div class="wt-feature">
-
             <div class="icon">
               🔒
             </div>
@@ -661,7 +2290,6 @@ class WatchTogetherApp {
             <span>
               Movie bytes never go to Streamlit or Supabase.
             </span>
-
           </div>
 
         </section>
@@ -670,21 +2298,29 @@ class WatchTogetherApp {
     `;
 
     this.root
-      .querySelector("#create-room")
+      .querySelector(
+        "#create-room"
+      )
       ?.addEventListener(
         "click",
         () => {
-          this.phase = "create";
+          this.phase =
+            "create";
+
           this.render();
         }
       );
 
     this.root
-      .querySelector("#join-room")
+      .querySelector(
+        "#join-room"
+      )
       ?.addEventListener(
         "click",
         () => {
-          this.phase = "join";
+          this.phase =
+            "join";
+
           this.render();
         }
       );
@@ -693,7 +2329,6 @@ class WatchTogetherApp {
   renderCreate() {
     this.root.innerHTML = `
       <div class="wt-shell">
-
         ${this.topbar()}
 
         <div class="wt-stage">
@@ -751,7 +2386,6 @@ class WatchTogetherApp {
           </form>
 
         </div>
-
       </div>
     `;
 
@@ -760,13 +2394,17 @@ class WatchTogetherApp {
       ?.addEventListener(
         "click",
         () => {
-          this.phase = "landing";
+          this.phase =
+            "landing";
+
           this.render();
         }
       );
 
     this.root
-      .querySelector("#create-form")
+      .querySelector(
+        "#create-form"
+      )
       ?.addEventListener(
         "submit",
         async (e) => {
@@ -774,7 +2412,9 @@ class WatchTogetherApp {
 
           const name =
             this.root
-              .querySelector("#create-name")
+              .querySelector(
+                "#create-name"
+              )
               ?.value
               .trim();
 
@@ -791,7 +2431,7 @@ class WatchTogetherApp {
       );
   }
 
-  renderJoin() {
+    renderJoin() {
     this.root.innerHTML = `
       <div class="wt-shell">
 
@@ -824,7 +2464,9 @@ class WatchTogetherApp {
                 id="join-code"
                 maxlength="18"
                 required
-                value="${esc(this.roomCode)}"
+                value="${esc(
+                  this.roomCode
+                )}"
                 placeholder="WATCH-8F42AB"
                 autocomplete="off"
               >
@@ -870,18 +2512,21 @@ class WatchTogetherApp {
           </form>
 
         </div>
-
       </div>
     `;
 
     this.root
-      .querySelector("#back")
+      .querySelector(
+        "#back"
+      )
       ?.addEventListener(
         "click",
         () => {
-          this.phase = "landing";
+          this.phase =
+            "landing";
 
-          this.roomCode = "";
+          this.roomCode =
+            "";
 
           this.updateUrl("");
 
@@ -890,7 +2535,9 @@ class WatchTogetherApp {
       );
 
     this.root
-      .querySelector("#join-form")
+      .querySelector(
+        "#join-form"
+      )
       ?.addEventListener(
         "submit",
         async (e) => {
@@ -899,17 +2546,25 @@ class WatchTogetherApp {
           const code =
             safeRoomCode(
               this.root
-                .querySelector("#join-code")
-                ?.value || ""
+                .querySelector(
+                  "#join-code"
+                )
+                ?.value ||
+                ""
             );
 
           const name =
             this.root
-              .querySelector("#join-name")
+              .querySelector(
+                "#join-name"
+              )
               ?.value
               .trim();
 
-          if (!code || !name) {
+          if (
+            !code ||
+            !name
+          ) {
             return;
           }
 
@@ -962,15 +2617,22 @@ class WatchTogetherApp {
     name,
     creating
   ) {
-    await this.leaveRoom(false);
+    await this.leaveRoom(
+      false
+    );
 
-    this.intentionalDisconnect = false;
+    this.intentionalDisconnect =
+      false;
 
     this.roomCode =
-      safeRoomCode(code);
+      safeRoomCode(
+        code
+      );
 
     this.name =
-      String(name).slice(
+      String(
+        name
+      ).slice(
         0,
         40
       );
@@ -995,12 +2657,16 @@ class WatchTogetherApp {
         {
           config: {
             presence: {
-              key: this.peerId,
+              key:
+                this.peerId,
             },
 
             broadcast: {
-              ack: true,
-              self: false,
+              ack:
+                true,
+
+              self:
+                false,
             },
           },
         }
@@ -1009,8 +2675,22 @@ class WatchTogetherApp {
     this.channel =
       channel;
 
+    /*
+     * Important:
+     * Realtime may SUBSCRIBE again
+     * after a temporary socket outage.
+     * Do not send an active viewer
+     * back to the lobby.
+     */
+
+    let hasSubscribedOnce =
+      false;
+
     const onBroadcast =
-      (event, handler) =>
+      (
+        event,
+        handler
+      ) =>
         channel.on(
           "broadcast",
           {
@@ -1025,70 +2705,98 @@ class WatchTogetherApp {
 
     onBroadcast(
       "chat",
-      (p) => this.onChat(p)
+      (p) =>
+        this.onChat(p)
     );
 
     onBroadcast(
       "playback",
-      (p) => this.onPlayback(p)
+      (p) =>
+        this.onPlayback(p)
     );
 
     onBroadcast(
       "state-request",
-      (p) => this.onStateRequest(p)
+      (p) =>
+        this.onStateRequest(
+          p
+        )
     );
 
     onBroadcast(
       "clock-ping",
-      (p) => this.onClockPing(p)
+      (p) =>
+        this.onClockPing(
+          p
+        )
     );
 
     onBroadcast(
       "clock-pong",
-      (p) => this.onClockPong(p)
+      (p) =>
+        this.onClockPong(
+          p
+        )
     );
 
     onBroadcast(
       "signal",
-      (p) => this.onSignal(p)
+      (p) =>
+        this.onSignal(p)
     );
 
     onBroadcast(
       "renegotiate",
-      (p) => this.onRenegotiate(p)
+      (p) =>
+        this.onRenegotiate(
+          p
+        )
     );
 
     onBroadcast(
       "kick",
-      (p) => this.onKick(p)
+      (p) =>
+        this.onKick(p)
     );
 
     onBroadcast(
       "room-control",
-      (p) => this.onRoomControl(p)
+      (p) =>
+        this.onRoomControl(
+          p
+        )
     );
 
     onBroadcast(
       "moderation-mute",
-      (p) => this.onModerationMute(p)
+      (p) =>
+        this.onModerationMute(
+          p
+        )
     );
 
     onBroadcast(
       "end-room",
-      (p) => this.onEndRoom(p)
+      (p) =>
+        this.onEndRoom(
+          p
+        )
     );
 
     channel
       .on(
         "presence",
         {
-          event: "sync",
+          event:
+            "sync",
         },
         () =>
           this.onPresenceSync()
       )
       .subscribe(
-        async (status) => {
+        async (
+          status
+        ) => {
           if (
             this.channel !==
             channel
@@ -1100,33 +2808,56 @@ class WatchTogetherApp {
             status ===
             "SUBSCRIBED"
           ) {
-            this.connected = true;
+            const isResubscribe =
+              hasSubscribedOnce;
+
+            hasSubscribedOnce =
+              true;
+
+            this.connected =
+              true;
 
             this.connectionStatus =
               "connected";
 
             await this.trackPresence();
 
-            if (creating) {
+            if (
+              creating &&
+              !isResubscribe
+            ) {
               this.participants.set(
                 this.peerId,
                 {
-                  peerId: this.peerId,
-                  name: this.name,
-                  joinedAt: this.joinedAt,
-                  creator: true,
+                  peerId:
+                    this.peerId,
+
+                  name:
+                    this.name,
+
+                  joinedAt:
+                    this.joinedAt,
+
+                  creator:
+                    true,
 
                   movieHash:
-                    this.fileHash || "",
+                    this.fileHash ||
+                    "",
 
                   movieName:
-                    this.file?.name || "",
+                    this.file
+                      ?.name ||
+                    "",
 
                   movieSize:
-                    this.file?.size || 0,
+                    this.file
+                      ?.size ||
+                    0,
 
                   movieDuration:
-                    this.fileDuration || 0,
+                    this.fileDuration ||
+                    0,
 
                   mic:
                     this.micEnabled,
@@ -1147,72 +2878,113 @@ class WatchTogetherApp {
               this.roomCode
             );
 
-            this.phase =
-              "lobby";
+            if (
+              !isResubscribe
+            ) {
+              this.phase =
+                "lobby";
 
-            this.render();
-
-            if (!creating) {
-              await sleep(
-                2800
-              );
+              this.render();
 
               if (
-                this.channel !==
-                channel
+                !creating
               ) {
-                return;
-              }
-
-              if (
-                this.participants.size <=
-                1
-              ) {
-                this.toast(
-                  "Room not found. Ask the host for a fresh invite link.",
-                  "bad"
+                await sleep(
+                  2800
                 );
 
-                await this.leaveRoom(false);
+                if (
+                  this.channel !==
+                  channel
+                ) {
+                  return;
+                }
 
-                this.phase =
-                  "join";
+                if (
+                  this.participants
+                    .size <=
+                  1
+                ) {
+                  this.toast(
+                    "Room not found. Ask the host for a fresh invite link.",
+                    "bad"
+                  );
 
-                this.connectionStatus =
-                  "offline";
+                  await this.leaveRoom(
+                    false
+                  );
 
-                this.render();
+                  this.phase =
+                    "join";
 
-                return;
+                  this.connectionStatus =
+                    "offline";
+
+                  this.render();
+
+                  return;
+                }
               }
+
+            } else {
+              /*
+               * Stay on current screen.
+               */
+
+              this.updateTopStatus();
+
+              this.toast(
+                "Connection restored ✓",
+                "good"
+              );
             }
 
             this.send(
               "state-request",
               {
-                from: this.peerId,
+                from:
+                  this.peerId,
               }
             );
 
-            this.syncClock();
+            this.syncClock(
+              true
+            );
 
           } else if (
             [
               "CHANNEL_ERROR",
               "TIMED_OUT",
-            ].includes(status)
+            ].includes(
+              status
+            )
           ) {
+            this.connected =
+              false;
+
             this.connectionStatus =
               "reconnecting";
 
             this.updateTopStatus();
 
+            try {
+              this.supabase
+                ?.realtime
+                ?.connect();
+
+            } catch {}
+
           } else if (
-            status === "CLOSED" &&
+            status ===
+              "CLOSED" &&
             !this.destroyed &&
             !this.intentionalDisconnect &&
-            this.channel === channel
+            this.channel ===
+              channel
           ) {
+            this.connected =
+              false;
+
             this.connectionStatus =
               "reconnecting";
 
@@ -1225,7 +2997,9 @@ class WatchTogetherApp {
   }
 
   async trackPresence() {
-    if (!this.channel) {
+    if (
+      !this.channel
+    ) {
       return;
     }
 
@@ -1241,25 +3015,37 @@ class WatchTogetherApp {
           this.joinedAt,
 
         creator:
-          Boolean(this.creating),
+          Boolean(
+            this.creating
+          ),
 
         movieHash:
-          this.fileHash || "",
+          this.fileHash ||
+          "",
 
         movieName:
-          this.file?.name || "",
+          this.file
+            ?.name ||
+          "",
 
         movieSize:
-          this.file?.size || 0,
+          this.file
+            ?.size ||
+          0,
 
         movieDuration:
-          this.fileDuration || 0,
+          this.fileDuration ||
+          0,
 
         mic:
-          Boolean(this.micEnabled),
+          Boolean(
+            this.micEnabled
+          ),
 
         cam:
-          Boolean(this.camEnabled),
+          Boolean(
+            this.camEnabled
+          ),
       });
 
     } catch (error) {
@@ -1271,12 +3057,15 @@ class WatchTogetherApp {
   }
 
   onPresenceSync() {
-    if (!this.channel) {
+    if (
+      !this.channel
+    ) {
       return;
     }
 
     const raw =
-      this.channel.presenceState();
+      this.channel
+        .presenceState();
 
     const next =
       new Map();
@@ -1285,13 +3074,15 @@ class WatchTogetherApp {
       const [
         key,
         values,
-      ] of Object.entries(
+      ]
+      of Object.entries(
         raw || {}
       )
     ) {
       for (
         const presence
-        of values || []
+        of values ||
+          []
       ) {
         const id =
           presence.peerId ||
@@ -1307,10 +3098,12 @@ class WatchTogetherApp {
         if (
           !existing ||
           Number(
-            presence.joinedAt || 0
+            presence.joinedAt ||
+            0
           ) >=
             Number(
-              existing.joinedAt || 0
+              existing.joinedAt ||
+              0
             )
         ) {
           next.set(
@@ -1340,19 +3133,23 @@ class WatchTogetherApp {
                 ),
 
               movieHash:
-                presence.movieHash || "",
+                presence.movieHash ||
+                "",
 
               movieName:
-                presence.movieName || "",
+                presence.movieName ||
+                "",
 
               movieSize:
                 Number(
-                  presence.movieSize || 0
+                  presence.movieSize ||
+                  0
                 ),
 
               movieDuration:
                 Number(
-                  presence.movieDuration || 0
+                  presence.movieDuration ||
+                  0
                 ),
 
               mic:
@@ -1374,35 +3171,46 @@ class WatchTogetherApp {
       next;
 
     if (
-      next.size > 10 &&
-      next.has(this.peerId)
+      next.size >
+        10 &&
+      next.has(
+        this.peerId
+      )
     ) {
       this.toast(
         "This room already has 10 people.",
         "bad"
       );
 
-      this.leaveRoom(true);
+      this.leaveRoom(
+        true
+      );
 
       return;
     }
 
     const sorted =
-      [...next.values()]
-        .sort(
-          (a, b) =>
-            Number(b.creator) -
-              Number(a.creator) ||
-            a.peerId.localeCompare(
-              b.peerId
-            )
-        );
+      [
+        ...next.values(),
+      ].sort(
+        (a, b) =>
+          Number(
+            b.creator
+          ) -
+            Number(
+              a.creator
+            ) ||
+          a.peerId.localeCompare(
+            b.peerId
+          )
+      );
 
     const oldHost =
       this.hostId;
 
     this.hostId =
-      sorted[0]?.peerId ||
+      sorted[0]
+        ?.peerId ||
       null;
 
     this.isHost =
@@ -1419,8 +3227,10 @@ class WatchTogetherApp {
       of currentIds
     ) {
       if (
-        id === this.peerId ||
-        this.previousParticipantIds.has(id)
+        id ===
+          this.peerId ||
+        this.previousParticipantIds
+          .has(id)
       ) {
         continue;
       }
@@ -1429,7 +3239,8 @@ class WatchTogetherApp {
         this.isHost &&
         this.locked &&
         (
-          next.get(id)?.joinedAt ||
+          next.get(id)
+            ?.joinedAt ||
           0
         ) >=
           this.lockedAt
@@ -1437,16 +3248,23 @@ class WatchTogetherApp {
         this.send(
           "kick",
           {
-            to: id,
-            from: this.peerId,
-            reason: "This room is locked.",
+            to:
+              id,
+
+            from:
+              this.peerId,
+
+            reason:
+              "This room is locked.",
           }
         );
 
         continue;
       }
 
-      this.ensurePeerHandshake(id);
+      this.ensurePeerHandshake(
+        id
+      );
     }
 
     for (
@@ -1454,9 +3272,13 @@ class WatchTogetherApp {
       of this.previousParticipantIds
     ) {
       if (
-        !currentIds.has(id)
+        !currentIds.has(
+          id
+        )
       ) {
-        this.closePeer(id);
+        this.closePeer(
+          id
+        );
       }
     }
 
@@ -1464,15 +3286,22 @@ class WatchTogetherApp {
       currentIds;
 
     if (
-      oldHost !== this.hostId &&
+      oldHost !==
+        this.hostId &&
       this.hostId
     ) {
-      this.clockSamples = [];
+      this.clockSamples =
+        [];
 
-      this.clockOffset = 0;
-      this.clockRtt = null;
+      this.clockOffset =
+        0;
 
-      if (this.isHost) {
+      this.clockRtt =
+        null;
+
+      if (
+        this.isHost
+      ) {
         if (oldHost) {
           this.toast(
             "You are now the host 👑",
@@ -1488,7 +3317,9 @@ class WatchTogetherApp {
         if (oldHost) {
           this.toast(
             `${
-              next.get(this.hostId)?.name ||
+              next.get(
+                this.hostId
+              )?.name ||
               "A participant"
             } is now the host.`,
             "good"
@@ -1500,7 +3331,8 @@ class WatchTogetherApp {
         this.send(
           "state-request",
           {
-            from: this.peerId,
+            from:
+              this.peerId,
           }
         );
       }
@@ -1509,38 +3341,50 @@ class WatchTogetherApp {
     this.verifyAgainstHost();
 
     if (
-      this.phase === "lobby"
+      this.phase ===
+      "lobby"
     ) {
       this.updateLobbyParticipants();
     }
 
     if (
-      this.phase === "watch"
+      this.phase ===
+      "watch"
     ) {
       this.updatePeopleUI();
+
       this.updateWatchControlsRole();
+
       this.updateTopStatus();
     }
   }
-
-  ensurePeerHandshake(peerId) {
+    ensurePeerHandshake(
+    peerId
+  ) {
     if (
       !peerId ||
-      peerId === this.peerId
+      peerId ===
+        this.peerId
     ) {
       return;
     }
 
-    this.ensurePC(peerId);
+    this.ensurePC(
+      peerId
+    );
 
     if (
-      this.peerId.localeCompare(
-        peerId
-      ) < 0
+      this.peerId
+        .localeCompare(
+          peerId
+        ) < 0
     ) {
       setTimeout(
         () =>
-          this.makeOffer(peerId),
+          this.makeOffer(
+            peerId
+          ),
+
         200 +
           Math.random() *
             300
@@ -1584,7 +3428,9 @@ class WatchTogetherApp {
             </p>
 
             <div class="wt-room-code">
-              ${esc(this.roomCode)}
+              ${esc(
+                this.roomCode
+              )}
             </div>
 
             <div
@@ -1643,35 +3489,49 @@ class WatchTogetherApp {
     this.updateLobbyParticipants();
 
     this.root
-      .querySelector("#copy-invite")
+      .querySelector(
+        "#copy-invite"
+      )
       ?.addEventListener(
         "click",
-        () => this.copyInvite()
+        () =>
+          this.copyInvite()
       );
 
     this.root
-      .querySelector("#share-invite")
+      .querySelector(
+        "#share-invite"
+      )
       ?.addEventListener(
         "click",
-        () => this.shareInvite()
+        () =>
+          this.shareInvite()
       );
 
     this.root
-      .querySelector("#choose-movie")
+      .querySelector(
+        "#choose-movie"
+      )
       ?.addEventListener(
         "click",
         () => {
-          this.phase = "movie";
+          this.phase =
+            "movie";
+
           this.render();
         }
       );
 
     this.root
-      .querySelector("#leave-room")
+      .querySelector(
+        "#leave-room"
+      )
       ?.addEventListener(
         "click",
         () =>
-          this.leaveRoom(true)
+          this.leaveRoom(
+            true
+          )
       );
   }
 
@@ -1686,12 +3546,14 @@ class WatchTogetherApp {
     }
 
     const sorted =
-      [...this.participants.values()]
-        .sort(
-          (a, b) =>
-            a.joinedAt -
-            b.joinedAt
-        );
+      [
+        ...this.participants
+          .values(),
+      ].sort(
+        (a, b) =>
+          a.joinedAt -
+          b.joinedAt
+      );
 
     box.innerHTML =
       sorted
@@ -1707,7 +3569,8 @@ class WatchTogetherApp {
 
                 <span>
                   ${esc(
-                    p.peerId === this.peerId
+                    p.peerId ===
+                      this.peerId
                       ? `${p.name} (You)`
                       : p.name
                   )}
@@ -1716,7 +3579,8 @@ class WatchTogetherApp {
               </div>
 
               ${
-                p.peerId === this.hostId
+                p.peerId ===
+                  this.hostId
                   ? `
                     <span class="wt-badge">
                       👑 HOST
@@ -1752,9 +3616,10 @@ class WatchTogetherApp {
 
   async copyInvite() {
     try {
-      await navigator.clipboard.writeText(
-        this.inviteUrl()
-      );
+      await navigator.clipboard
+        .writeText(
+          this.inviteUrl()
+        );
 
       this.toast(
         "Invite link copied ✓",
@@ -1773,10 +3638,13 @@ class WatchTogetherApp {
     const url =
       this.inviteUrl();
 
-    if (navigator.share) {
+    if (
+      navigator.share
+    ) {
       try {
         await navigator.share({
-          title: "WatchTogether",
+          title:
+            "WatchTogether",
 
           text:
             `Join my WatchTogether room ${this.roomCode}`,
@@ -1820,12 +3688,10 @@ class WatchTogetherApp {
             </strong>
 
             <div class="wt-progress">
-
               <i
                 id="hash-progress"
                 style="width:${this.hashProgress}%"
               ></i>
-
             </div>
 
           </div>
@@ -1888,7 +3754,9 @@ class WatchTogetherApp {
                 <h3>
                   ${
                     this.file
-                      ? esc(this.file.name)
+                      ? esc(
+                          this.file.name
+                        )
                       : "Select your movie file"
                   }
                 </h3>
@@ -1896,11 +3764,15 @@ class WatchTogetherApp {
                 <p class="wt-muted">
                   ${
                     this.file
-                      ? `${formatBytes(
-                          this.file.size
-                        )} · ${formatTime(
-                          this.fileDuration
-                        )}`
+                      ? `${
+                          formatBytes(
+                            this.file.size
+                          )
+                        } · ${
+                          formatTime(
+                            this.fileDuration
+                          )
+                        }`
                       : "MP4, WebM and other formats supported by your browser"
                   }
                 </p>
@@ -1955,35 +3827,47 @@ class WatchTogetherApp {
     `;
 
     this.root
-      .querySelector("#movie-back")
+      .querySelector(
+        "#movie-back"
+      )
       ?.addEventListener(
         "click",
         () => {
-          this.phase = "lobby";
+          this.phase =
+            "lobby";
+
           this.render();
         }
       );
 
     this.root
-      .querySelector("#movie-file")
+      .querySelector(
+        "#movie-file"
+      )
       ?.addEventListener(
         "change",
         (e) =>
           this.selectMovie(
-            e.target.files?.[0]
+            e.target.files
+              ?.[0]
           )
       );
 
     this.root
-      .querySelector("#enter-watch")
+      .querySelector(
+        "#enter-watch"
+      )
       ?.addEventListener(
         "click",
         () => {
-          if (!this.verified) {
+          if (
+            !this.verified
+          ) {
             return;
           }
 
-          this.phase = "watch";
+          this.phase =
+            "watch";
 
           this.render();
         }
@@ -1998,31 +3882,36 @@ class WatchTogetherApp {
     this.file =
       file;
 
-    if (this.fileUrl) {
+    if (
+      this.fileUrl
+    ) {
       URL.revokeObjectURL(
         this.fileUrl
       );
     }
-
-    /*
-     * MOVIE STAYS LOCAL
-     */
 
     this.fileUrl =
       URL.createObjectURL(
         file
       );
 
-    this.fileHash = "";
-    this.fileDuration = 0;
+    this.fileHash =
+      "";
 
-    this.verified = false;
+    this.fileDuration =
+      0;
+
+    this.verified =
+      false;
 
     this.verifyMessage =
       "Checking file…";
 
-    this.hashing = true;
-    this.hashProgress = 0;
+    this.hashing =
+      true;
+
+    this.hashProgress =
+      0;
 
     this.renderMovieSelect();
 
@@ -2033,7 +3922,8 @@ class WatchTogetherApp {
         );
 
       const hasher =
-        await this.hashWasm.createSHA256();
+        await this.hashWasm
+          .createSHA256();
 
       hasher.init();
 
@@ -2044,8 +3934,10 @@ class WatchTogetherApp {
 
       for (
         let offset = 0;
-        offset < file.size;
-        offset += chunkSize
+        offset <
+          file.size;
+        offset +=
+          chunkSize
       ) {
         const end =
           Math.min(
@@ -2092,9 +3984,11 @@ class WatchTogetherApp {
 
         if (label) {
           label.textContent =
-            `${Math.round(
-              this.hashProgress
-            )}%`;
+            `${
+              Math.round(
+                this.hashProgress
+              )
+            }%`;
         }
 
         await sleep(0);
@@ -2105,8 +3999,11 @@ class WatchTogetherApp {
           "hex"
         );
 
-      this.hashing = false;
-      this.hashProgress = 100;
+      this.hashing =
+        false;
+
+      this.hashProgress =
+        100;
 
       await this.trackPresence();
 
@@ -2120,11 +4017,14 @@ class WatchTogetherApp {
         error
       );
 
-      this.hashing = false;
+      this.hashing =
+        false;
 
-      this.fileHash = "";
+      this.fileHash =
+        "";
 
-      this.verified = false;
+      this.verified =
+        false;
 
       this.verifyMessage =
         "We couldn't check this file. Try selecting it again.";
@@ -2158,22 +4058,32 @@ class WatchTogetherApp {
               "src"
             );
 
-            resolve(duration);
+            resolve(
+              duration
+            );
           };
 
         probe.onerror =
-          () => resolve(0);
+          () =>
+            resolve(
+              0
+            );
       }
     );
   }
 
   verifyAgainstHost() {
-    if (!this.fileHash) {
+    if (
+      !this.fileHash
+    ) {
       return;
     }
 
-    if (this.isHost) {
-      this.verified = true;
+    if (
+      this.isHost
+    ) {
+      this.verified =
+        true;
 
       this.verifyMessage =
         "File verified. Friends will compare their fingerprint with yours.";
@@ -2186,8 +4096,12 @@ class WatchTogetherApp {
         this.hostId
       );
 
-    if (!host?.movieHash) {
-      this.verified = false;
+    if (
+      !host
+        ?.movieHash
+    ) {
+      this.verified =
+        false;
 
       this.verifyMessage =
         "File verified locally. Waiting for the host to select their movie.";
@@ -2205,7 +4119,8 @@ class WatchTogetherApp {
         Math.abs(
           host.movieDuration -
           this.fileDuration
-        ) < 1.5;
+        ) <
+          1.5;
 
       const sizeSame =
         !host.movieSize ||
@@ -2222,14 +4137,16 @@ class WatchTogetherApp {
           : "The fingerprint matches, but file metadata differs. Please use the exact same file.";
 
     } else {
-      this.verified = false;
+      this.verified =
+        false;
 
       this.verifyMessage =
         "Different movie file. You and the host must select the exact same movie.";
     }
 
     if (
-      this.phase === "movie" &&
+      this.phase ===
+        "movie" &&
       !this.hashing
     ) {
       const status =
@@ -2250,7 +4167,9 @@ class WatchTogetherApp {
             this.verified
               ? "✓"
               : "⚠"
-          } ${this.verifyMessage}`;
+          } ${
+            this.verifyMessage
+          }`;
       }
 
       const enter =
@@ -2265,7 +4184,7 @@ class WatchTogetherApp {
     }
   }
 
-  renderWatch() {
+    renderWatch() {
     this.root.innerHTML = `
       <div class="wt-shell wt-watch">
 
@@ -2288,25 +4207,19 @@ class WatchTogetherApp {
                 class="wt-video-empty"
                 id="video-empty"
               >
-
                 <div>
-
                   <span class="big">
                     🎬
                   </span>
 
                   Loading your local movie…
-
                 </div>
-
               </div>
 
               <div class="wt-player-overlay">
-
                 <span class="wt-local-note">
                   🔒 Playing locally · only playback is synchronized
                 </span>
-
               </div>
 
             </div>
@@ -2381,11 +4294,11 @@ class WatchTogetherApp {
                   aria-label="Movie audio mode"
                   title="Stereo Compatibility mixes surround channels into stereo so music and effects are not lost"
                 >
-
                   <option
                     value="compat"
                     ${
-                      this.movieAudioMode === "compat"
+                      this.movieAudioMode ===
+                      "compat"
                         ? "selected"
                         : ""
                     }
@@ -2396,14 +4309,14 @@ class WatchTogetherApp {
                   <option
                     value="native"
                     ${
-                      this.movieAudioMode === "native"
+                      this.movieAudioMode ===
+                      "native"
                         ? "selected"
                         : ""
                     }
                   >
                     🔊 Native
                   </option>
-
                 </select>
 
                 <select
@@ -2427,15 +4340,11 @@ class WatchTogetherApp {
                       : "disabled"
                   }
                 >
-
                   <option value="0.75">
                     0.75×
                   </option>
 
-                  <option
-                    value="1"
-                    selected
-                  >
+                  <option value="1" selected>
                     1×
                   </option>
 
@@ -2450,7 +4359,6 @@ class WatchTogetherApp {
                   <option value="2">
                     2×
                   </option>
-
                 </select>
 
                 <button
@@ -2618,7 +4526,9 @@ class WatchTogetherApp {
           <div class="wt-sync">
 
             <span id="sync-label">
-              ${esc(this.syncLabel)}
+              ${esc(
+                this.syncLabel
+              )}
             </span>
 
             <button
@@ -2648,10 +4558,6 @@ class WatchTogetherApp {
     this.video.src =
       this.fileUrl;
 
-    /*
-     * UNIVERSAL AUDIO INITIALIZATION
-     */
-
     this.initializeMovieAudio()
       .catch(
         (error) => {
@@ -2676,7 +4582,9 @@ class WatchTogetherApp {
       "loadedmetadata",
       () => {
         this.root
-          .querySelector("#video-empty")
+          .querySelector(
+            "#video-empty"
+          )
           ?.classList.add(
             "wt-hidden"
           );
@@ -2696,10 +4604,6 @@ class WatchTogetherApp {
         }
 
         this.refreshAudioTrackSelector();
-
-        /*
-         * Native browser fallback.
-         */
 
         const tracks =
           this.video.audioTracks;
@@ -2726,7 +4630,9 @@ class WatchTogetherApp {
           );
         }
 
-        if (!this.isHost) {
+        if (
+          !this.isHost
+        ) {
           this.send(
             "state-request",
             {
@@ -2751,7 +4657,9 @@ class WatchTogetherApp {
           );
         }
 
-        if (this.isHost) {
+        if (
+          this.isHost
+        ) {
           this.broadcastPlayback(
             "play"
           );
@@ -2767,10 +4675,12 @@ class WatchTogetherApp {
         if (
           this.customAudioActive
         ) {
-          this.stopCustomAudioPlayback();
+          this.pauseCustomAudioPlayback();
         }
 
-        if (this.isHost) {
+        if (
+          this.isHost
+        ) {
           this.broadcastPlayback(
             "pause"
           );
@@ -2784,15 +4694,34 @@ class WatchTogetherApp {
       "seeked",
       () => {
         if (
-          this.customAudioActive &&
-          !this.video.paused
+          this.customAudioActive
         ) {
-          this.restartCustomAudioPlayback(
-            25
-          );
+          this.pauseCustomAudioPlayback();
+
+          if (
+            this.video.paused
+          ) {
+            this.primeCustomAudio(
+              this.video.currentTime
+            ).catch(
+              (error) => {
+                console.warn(
+                  "Custom audio seek prime failed",
+                  error
+                );
+              }
+            );
+
+          } else {
+            this.restartCustomAudioPlayback(
+              25
+            );
+          }
         }
 
-        if (this.isHost) {
+        if (
+          this.isHost
+        ) {
           this.broadcastPlayback(
             "seek"
           );
@@ -2804,15 +4733,14 @@ class WatchTogetherApp {
       "ratechange",
       () => {
         if (
-          this.customAudioActive &&
-          !this.video.paused
+          this.customAudioActive
         ) {
-          this.restartCustomAudioPlayback(
-            60
-          );
+          this.updateCustomAudioRate();
         }
 
-        if (this.isHost) {
+        if (
+          this.isHost
+        ) {
           this.broadcastPlayback(
             "rate"
           );
@@ -2821,17 +4749,23 @@ class WatchTogetherApp {
     );
 
     this.root
-      .querySelector("#play-btn")
+      .querySelector(
+        "#play-btn"
+      )
       ?.addEventListener(
         "click",
         async () => {
-          if (!this.isHost) {
+          if (
+            !this.isHost
+          ) {
             return;
           }
 
           await this.resumeMovieAudio();
 
-          if (this.video.paused) {
+          if (
+            this.video.paused
+          ) {
             await this.video
               .play()
               .catch(
@@ -2845,21 +4779,28 @@ class WatchTogetherApp {
       );
 
     this.root
-      .querySelector("#timeline")
+      .querySelector(
+        "#timeline"
+      )
       ?.addEventListener(
         "input",
         (e) => {
-          if (this.isHost) {
+          if (
+            this.isHost
+          ) {
             this.video.currentTime =
               Number(
-                e.target.value || 0
+                e.target.value ||
+                0
               );
           }
         }
       );
 
     this.root
-      .querySelector("#volume")
+      .querySelector(
+        "#volume"
+      )
       ?.addEventListener(
         "input",
         (e) =>
@@ -2871,7 +4812,9 @@ class WatchTogetherApp {
       );
 
     this.root
-      .querySelector("#audio-mode")
+      .querySelector(
+        "#audio-mode"
+      )
       ?.addEventListener(
         "change",
         async (e) => {
@@ -2885,7 +4828,9 @@ class WatchTogetherApp {
       );
 
     this.root
-      .querySelector("#audio-track")
+      .querySelector(
+        "#audio-track"
+      )
       ?.addEventListener(
         "change",
         async (e) => {
@@ -2895,7 +4840,9 @@ class WatchTogetherApp {
             );
 
           if (
-            Number.isInteger(index) &&
+            Number.isInteger(
+              index
+            ) &&
             index >= 0
           ) {
             await this.selectAudioTrack(
@@ -2906,21 +4853,36 @@ class WatchTogetherApp {
       );
 
     this.root
-      .querySelector("#speed")
+      .querySelector(
+        "#speed"
+      )
       ?.addEventListener(
         "change",
         (e) => {
-          if (this.isHost) {
-            this.video.playbackRate =
-              Number(
-                e.target.value || 1
-              );
+          if (
+            !this.isHost
+          ) {
+            return;
+          }
+
+          this.video.playbackRate =
+            Number(
+              e.target.value ||
+              1
+            );
+
+          if (
+            this.customAudioActive
+          ) {
+            this.updateCustomAudioRate();
           }
         }
       );
 
     this.root
-      .querySelector("#full-btn")
+      .querySelector(
+        "#full-btn"
+      )
       ?.addEventListener(
         "click",
         () =>
@@ -2928,24 +4890,31 @@ class WatchTogetherApp {
             .querySelector(
               ".wt-video-wrap"
             )
-            ?.requestFullscreen?.()
+            ?.requestFullscreen
+            ?.()
       );
 
     this.root
-      .querySelector("#pip-btn")
+      .querySelector(
+        "#pip-btn"
+      )
       ?.addEventListener(
         "click",
         async () => {
           try {
             if (
-              document.pictureInPictureElement
+              document
+                .pictureInPictureElement
             ) {
-              await document.exitPictureInPicture();
+              await document
+                .exitPictureInPicture();
 
             } else if (
-              document.pictureInPictureEnabled
+              document
+                .pictureInPictureEnabled
             ) {
-              await this.video.requestPictureInPicture();
+              await this.video
+                .requestPictureInPicture();
             }
 
           } catch {
@@ -2958,15 +4927,21 @@ class WatchTogetherApp {
       );
 
     this.root
-      .querySelector("#chat-form")
+      .querySelector(
+        "#chat-form"
+      )
       ?.addEventListener(
         "submit",
         (e) =>
-          this.sendChat(e)
+          this.sendChat(
+            e
+          )
       );
 
     this.root
-      .querySelector("#enable-camera")
+      .querySelector(
+        "#enable-camera"
+      )
       ?.addEventListener(
         "click",
         () =>
@@ -2974,7 +4949,9 @@ class WatchTogetherApp {
       );
 
     this.root
-      .querySelector("#enable-mic")
+      .querySelector(
+        "#enable-mic"
+      )
       ?.addEventListener(
         "click",
         () =>
@@ -2982,16 +4959,21 @@ class WatchTogetherApp {
       );
 
     this.root
-      .querySelector("#mic-device")
+      .querySelector(
+        "#mic-device"
+      )
       ?.addEventListener(
         "change",
         (e) => {
           const deviceId =
             String(
-              e.target.value || ""
+              e.target.value ||
+              ""
             );
 
-          if (deviceId) {
+          if (
+            deviceId
+          ) {
             this.enableMicrophone(
               deviceId,
               true
@@ -3001,7 +4983,9 @@ class WatchTogetherApp {
       );
 
     this.root
-      .querySelector("#mic-btn")
+      .querySelector(
+        "#mic-btn"
+      )
       ?.addEventListener(
         "click",
         () =>
@@ -3009,7 +4993,9 @@ class WatchTogetherApp {
       );
 
     this.root
-      .querySelector("#cam-btn")
+      .querySelector(
+        "#cam-btn"
+      )
       ?.addEventListener(
         "click",
         () =>
@@ -3017,7 +5003,9 @@ class WatchTogetherApp {
       );
 
     this.root
-      .querySelector("#sync-now")
+      .querySelector(
+        "#sync-now"
+      )
       ?.addEventListener(
         "click",
         () =>
@@ -3025,7 +5013,9 @@ class WatchTogetherApp {
       );
 
     this.root
-      .querySelector("#lock-btn")
+      .querySelector(
+        "#lock-btn"
+      )
       ?.addEventListener(
         "click",
         () =>
@@ -3033,7 +5023,9 @@ class WatchTogetherApp {
       );
 
     this.root
-      .querySelector("#end-btn")
+      .querySelector(
+        "#end-btn"
+      )
       ?.addEventListener(
         "click",
         () =>
@@ -3054,7 +5046,9 @@ class WatchTogetherApp {
 
     this.refreshAudioTrackSelector();
 
-    if (!this.isHost) {
+    if (
+      !this.isHost
+    ) {
       this.syncClock();
 
       this.send(
@@ -3072,41 +5066,37 @@ class WatchTogetherApp {
     }
   }
 
-  /*
-   * ============================================================
-   * UNIVERSAL LOCAL AUDIO
-   * ============================================================
-   */
-
-  async loadBrowserModule(src, globalName) {
-  if (
-    globalName &&
-    globalThis[globalName]
+    async loadBrowserModule(
+    src,
+    globalName
   ) {
-    return globalThis[
+    if (
+      globalName &&
+      globalThis[
+        globalName
+      ]
+    ) {
+      return globalThis[
+        globalName
+      ];
+    }
+
+    const module =
+      await import(
+        src
+      );
+
+    if (
       globalName
-    ];
+    ) {
+      globalThis[
+        globalName
+      ] =
+        module;
+    }
+
+    return module;
   }
-
-  const module =
-    await import(src);
-
-  /*
-   * The AC3/DTS extension scripts expect
-   * Mediabunny to exist globally.
-   *
-   * We load the proper browser ESM build,
-   * then expose that exact module instance.
-   */
-
-  if (globalName) {
-    globalThis[
-      globalName
-    ] = module;
-  }
-
-  return module;
-}
 
   async loadBrowserScript(
     src,
@@ -3114,7 +5104,9 @@ class WatchTogetherApp {
   ) {
     if (
       globalName &&
-      globalThis[globalName]
+      globalThis[
+        globalName
+      ]
     ) {
       return globalThis[
         globalName
@@ -3122,15 +5114,20 @@ class WatchTogetherApp {
     }
 
     const existing =
-      [...document.scripts]
-        .find(
-          (script) =>
-            script.src === src
-        );
+      [
+        ...document.scripts,
+      ].find(
+        (script) =>
+          script.src ===
+          src
+      );
 
-    if (existing) {
+    if (
+      existing
+    ) {
       if (
-        existing.dataset.wtLoaded ===
+        existing.dataset
+          .wtLoaded ===
         "true"
       ) {
         return globalName
@@ -3141,12 +5138,16 @@ class WatchTogetherApp {
       }
 
       await new Promise(
-        (resolve, reject) => {
+        (
+          resolve,
+          reject
+        ) => {
           existing.addEventListener(
             "load",
             resolve,
             {
-              once: true,
+              once:
+                true,
             }
           );
 
@@ -3154,7 +5155,8 @@ class WatchTogetherApp {
             "error",
             reject,
             {
-              once: true,
+              once:
+                true,
             }
           );
         }
@@ -3168,7 +5170,10 @@ class WatchTogetherApp {
     }
 
     await new Promise(
-      (resolve, reject) => {
+      (
+        resolve,
+        reject
+      ) => {
         const script =
           document.createElement(
             "script"
@@ -3192,7 +5197,8 @@ class WatchTogetherApp {
             resolve();
           },
           {
-            once: true,
+            once:
+              true,
           }
         );
 
@@ -3205,13 +5211,15 @@ class WatchTogetherApp {
               )
             ),
           {
-            once: true,
+            once:
+              true,
           }
         );
 
-        document.head.appendChild(
-          script
-        );
+        document.head
+          .appendChild(
+            script
+          );
       }
     );
 
@@ -3243,24 +5251,22 @@ class WatchTogetherApp {
     this.mediaAudioInitPromise =
       (
         async () => {
-          if (!this.file) {
+          if (
+            !this.file
+          ) {
             await this.setupMovieAudio();
 
             return;
           }
 
           const mb =
-  await this.loadBrowserModule(
-    CDN_MEDIABUNNY,
-    "Mediabunny"
-  );
+            await this.loadBrowserModule(
+              CDN_MEDIABUNNY,
+              "Mediabunny"
+            );
 
           this.mediaBunny =
             mb;
-
-          /*
-           * BlobSource reads directly from the browser File.
-           */
 
           this.mediaInput =
             new mb.Input({
@@ -3280,7 +5286,9 @@ class WatchTogetherApp {
           this.mediaAudioTracks =
             tracks;
 
-          if (!tracks.length) {
+          if (
+            !tracks.length
+          ) {
             this.mediaAudioReady =
               true;
 
@@ -3290,10 +5298,6 @@ class WatchTogetherApp {
 
             return;
           }
-
-          /*
-           * Inspect every embedded audio track.
-           */
 
           const rawInfo =
             await Promise.all(
@@ -3313,31 +5317,36 @@ class WatchTogetherApp {
                       track
                         .getCodec()
                         .catch(
-                          () => null
+                          () =>
+                            null
                         ),
 
                       track
                         .getLanguageCode()
                         .catch(
-                          () => "und"
+                          () =>
+                            "und"
                         ),
 
                       track
                         .getName()
                         .catch(
-                          () => null
+                          () =>
+                            null
                         ),
 
                       track
                         .getDisposition()
                         .catch(
-                          () => ({})
+                          () =>
+                            ({})
                         ),
 
                       track
                         .canDecode()
                         .catch(
-                          () => false
+                          () =>
+                            false
                         ),
                     ]);
 
@@ -3361,16 +5370,18 @@ class WatchTogetherApp {
                   (info) =>
                     info.codec
                 )
-                .filter(Boolean)
+                .filter(
+                  Boolean
+                )
             );
 
-          /*
-           * AC-3 / E-AC-3 software decoder.
-           */
-
           if (
-            codecs.has("ac3") ||
-            codecs.has("eac3")
+            codecs.has(
+              "ac3"
+            ) ||
+            codecs.has(
+              "eac3"
+            )
           ) {
             try {
               const ac3 =
@@ -3389,12 +5400,10 @@ class WatchTogetherApp {
             }
           }
 
-          /*
-           * DTS software decoder.
-           */
-
           if (
-            codecs.has("dts")
+            codecs.has(
+              "dts"
+            )
           ) {
             try {
               const dts =
@@ -3413,29 +5422,24 @@ class WatchTogetherApp {
             }
           }
 
-          /*
-           * Recheck decoding after optional decoders are registered.
-           */
-
           this.mediaAudioTrackInfo =
             await Promise.all(
               rawInfo.map(
-                async (info) => ({
+                async (
+                  info
+                ) => ({
                   ...info,
 
                   canDecode:
                     await info.track
                       .canDecode()
                       .catch(
-                        () => false
+                        () =>
+                          false
                       ),
                 })
               )
             );
-
-          /*
-           * Find default / primary audio track.
-           */
 
           let primaryIndex =
             0;
@@ -3449,9 +5453,11 @@ class WatchTogetherApp {
               this.mediaAudioTrackInfo
                 .findIndex(
                   (info) =>
-                    info.track === primary ||
+                    info.track ===
+                      primary ||
                     info.track.id ===
-                      primary?.id
+                      primary
+                        ?.id
                 );
 
             if (
@@ -3462,11 +5468,6 @@ class WatchTogetherApp {
             }
 
           } catch {}
-
-          /*
-           * If default cannot decode,
-           * choose first decodable track.
-           */
 
           if (
             !this.mediaAudioTrackInfo[
@@ -3495,7 +5496,8 @@ class WatchTogetherApp {
               0,
               Math.max(
                 0,
-                this.mediaAudioTrackInfo.length -
+                this.mediaAudioTrackInfo
+                  .length -
                   1
               )
             );
@@ -3510,25 +5512,22 @@ class WatchTogetherApp {
               this.selectedAudioTrackIndex
             ];
 
-          /*
-           * Use custom audio engine if:
-           *
-           * - multiple embedded tracks exist
-           * - selected codec needs software decoding
-           */
-
           const needsCustomEngine =
-            this.mediaAudioTrackInfo.length >
+            this.mediaAudioTrackInfo
+              .length >
               1 ||
             (
               selectedInfo &&
-              !selectedInfo.nativeCanDecode &&
-              selectedInfo.canDecode
+              !selectedInfo
+                .nativeCanDecode &&
+              selectedInfo
+                .canDecode
             );
 
           if (
             needsCustomEngine &&
-            selectedInfo?.canDecode
+            selectedInfo
+              ?.canDecode
           ) {
             await this.activateCustomAudioTrack(
               this.selectedAudioTrackIndex,
@@ -3541,7 +5540,9 @@ class WatchTogetherApp {
         }
       )()
         .catch(
-          async (error) => {
+          async (
+            error
+          ) => {
             this.mediaAudioError =
               error;
 
@@ -3563,7 +5564,9 @@ class WatchTogetherApp {
   }
 
   async ensureMovieAudioContext() {
-    if (this.audioContext) {
+    if (
+      this.audioContext
+    ) {
       return this.audioContext;
     }
 
@@ -3571,7 +5574,9 @@ class WatchTogetherApp {
       window.AudioContext ||
       window.webkitAudioContext;
 
-    if (!AudioContextClass) {
+    if (
+      !AudioContextClass
+    ) {
       throw new Error(
         "Web Audio API is unavailable"
       );
@@ -3586,10 +5591,234 @@ class WatchTogetherApp {
     return this.audioContext;
   }
 
+  async ensureCustomAudioWorklet() {
+    if (
+      this.customAudioNode
+    ) {
+      return this.customAudioNode;
+    }
+
+    if (
+      this.customAudioWorkletPromise
+    ) {
+      return this.customAudioWorkletPromise;
+    }
+
+    this.customAudioWorkletPromise =
+      (
+        async () => {
+          const ctx =
+            await this.ensureMovieAudioContext();
+
+          if (
+            !ctx.audioWorklet
+          ) {
+            throw new Error(
+              "AudioWorklet is unavailable in this browser"
+            );
+          }
+
+          /*
+           * Streamlit does not automatically
+           * serve a sibling worklet JS file,
+           * so build it from the embedded
+           * source above.
+           */
+
+          const workletBlob =
+            new Blob(
+              [
+                AUDIO_WORKLET_SOURCE,
+              ],
+              {
+                type:
+                  "application/javascript",
+              }
+            );
+
+          const workletUrl =
+            URL.createObjectURL(
+              workletBlob
+            );
+
+          try {
+            await ctx.audioWorklet
+              .addModule(
+                workletUrl
+              );
+
+          } finally {
+            URL.revokeObjectURL(
+              workletUrl
+            );
+          }
+
+          const node =
+            new AudioWorkletNode(
+              ctx,
+              "watchtogether-pcm-player",
+              {
+                numberOfInputs:
+                  0,
+
+                numberOfOutputs:
+                  1,
+
+                outputChannelCount:
+                  [8],
+
+                channelCount:
+                  8,
+
+                channelCountMode:
+                  "explicit",
+
+                channelInterpretation:
+                  "discrete",
+              }
+            );
+
+          node.channelInterpretation =
+            "discrete";
+
+          node.port.onmessage =
+            (event) =>
+              this.onCustomAudioWorkletMessage(
+                event.data
+              );
+
+          this.customAudioNode =
+            node;
+
+          return node;
+        }
+      )()
+        .catch(
+          (error) => {
+            this.customAudioWorkletPromise =
+              null;
+
+            throw error;
+          }
+        );
+
+    return this.customAudioWorkletPromise;
+  }
+
+  onCustomAudioWorkletMessage(
+    message
+  ) {
+    if (
+      !message
+    ) {
+      return;
+    }
+
+    if (
+      message.type ===
+      "stats"
+    ) {
+      this.customAudioReadFrame =
+        Number(
+          message.readFrame ||
+          0
+        );
+
+      this.customAudioWriteFrame =
+        Number(
+          message.writeFrame ||
+          this.customAudioFramesPushed ||
+          0
+        );
+
+      this.customAudioBufferedSeconds =
+        Number(
+          message.bufferedSeconds ||
+          0
+        );
+
+      this.customAudioSourceSampleRate =
+        Number(
+          message.sourceSampleRate ||
+          this.customAudioSourceSampleRate ||
+          48000
+        );
+
+      this.customAudioChannelCount =
+        Number(
+          message.channelCount ||
+          this.customAudioChannelCount ||
+          2
+        );
+
+      this.customAudioUnderruns =
+        Number(
+          message.underruns ||
+          0
+        );
+
+      return;
+    }
+
+    if (
+      message.type ===
+      "underrun"
+    ) {
+      this.customAudioUnderruns =
+        Number(
+          message.underruns ||
+          this.customAudioUnderruns +
+            1
+        );
+
+      if (
+        this.customAudioActive &&
+        this.video &&
+        !this.video.paused
+      ) {
+        this.fillCustomAudioBuffer(
+          this.customAudioGeneration
+        ).catch(
+          (error) => {
+            console.warn(
+              "Custom audio underrun refill failed",
+              error
+            );
+          }
+        );
+      }
+    }
+  }
+
+  postCustomAudio(
+    message,
+    transfer = []
+  ) {
+    if (
+      !this.customAudioNode
+    ) {
+      return;
+    }
+
+    try {
+      this.customAudioNode
+        .port
+        .postMessage(
+          message,
+          transfer
+        );
+
+    } catch (error) {
+      console.warn(
+        "AudioWorklet message failed",
+        error
+      );
+    }
+  }
+
   async activateCustomAudioTrack(
     index,
-    quiet =
-      false
+    quiet = false
   ) {
     const info =
       this.mediaAudioTrackInfo[
@@ -3600,7 +5829,9 @@ class WatchTogetherApp {
       return;
     }
 
-    if (!info.canDecode) {
+    if (
+      !info.canDecode
+    ) {
       this.toast(
         `${
           this.universalAudioTrackLabel(
@@ -3618,13 +5849,9 @@ class WatchTogetherApp {
 
     await this.ensureMovieAudioContext();
 
-    await this.resumeMovieAudio();
+    await this.ensureCustomAudioWorklet();
 
-    /*
-     * Native <video> handles video.
-     *
-     * Custom engine handles chosen embedded audio.
-     */
+    await this.resumeMovieAudio();
 
     if (
       this.movieAudioSource
@@ -3632,7 +5859,9 @@ class WatchTogetherApp {
       this.disconnectMovieAudioGraph();
     }
 
-    if (this.video) {
+    if (
+      this.video
+    ) {
       this.video.muted =
         true;
 
@@ -3640,7 +5869,9 @@ class WatchTogetherApp {
         1;
     }
 
-    this.stopCustomAudioPlayback();
+    this.stopCustomAudioPlayback(
+      true
+    );
 
     this.customAudioActive =
       true;
@@ -3657,11 +5888,21 @@ class WatchTogetherApp {
 
     this.refreshAudioTrackSelector();
 
+    await this.primeCustomAudio(
+      Number(
+        this.video
+          ?.currentTime ||
+        0
+      )
+    );
+
     if (
       this.video &&
       !this.video.paused
     ) {
-      await this.startCustomAudioPlayback();
+      await this.startCustomAudioPlayback(
+        false
+      );
     }
 
     if (!quiet) {
@@ -3677,16 +5918,26 @@ class WatchTogetherApp {
     }
   }
 
-  buildCustomAudioOutputGraph() {
-    if (!this.audioContext) {
+    buildCustomAudioOutputGraph() {
+    if (
+      !this.audioContext ||
+      !this.customAudioNode
+    ) {
       return;
     }
+
+    try {
+      this.customAudioNode
+        .disconnect();
+
+    } catch {}
 
     if (
       this.customAudioInput
     ) {
       try {
-        this.customAudioInput.disconnect();
+        this.customAudioInput
+          .disconnect();
 
       } catch {}
     }
@@ -3716,6 +5967,15 @@ class WatchTogetherApp {
     const master =
       ctx.createGain();
 
+    input.channelCountMode =
+      "explicit";
+
+    input.channelCount =
+      8;
+
+    input.channelInterpretation =
+      "discrete";
+
     master.gain.value =
       this.movieVolume;
 
@@ -3730,10 +5990,10 @@ class WatchTogetherApp {
       master
     );
 
-    /*
-     * Native channel routing means preserve
-     * decoded channel layout and let browser/OS output it.
-     */
+    this.customAudioNode
+      .connect(
+        input
+      );
 
     if (
       this.movieAudioMode ===
@@ -3750,10 +6010,6 @@ class WatchTogetherApp {
       return;
     }
 
-    /*
-     * Stereo Compatibility mixer.
-     */
-
     const splitter =
       ctx.createChannelSplitter(
         8
@@ -3768,19 +6024,25 @@ class WatchTogetherApp {
       ctx.createDynamicsCompressor();
 
     compressor.threshold.value =
-      -10;
+      -3;
 
     compressor.knee.value =
-      12;
+      6;
 
     compressor.ratio.value =
-      4;
+      2;
 
     compressor.attack.value =
-      0.003;
+      0.006;
 
     compressor.release.value =
-      0.25;
+      0.14;
+
+    splitter.channelInterpretation =
+      "discrete";
+
+    merger.channelInterpretation =
+      "discrete";
 
     this.movieAudioNodes.push(
       splitter,
@@ -3820,84 +6082,64 @@ class WatchTogetherApp {
         );
       };
 
-    /*
-     * Front
-     */
-
     route(
       0,
       0,
-      0.70
+      0.62
     );
 
     route(
       1,
       1,
-      0.70
+      0.62
     );
-
-    /*
-     * Center dialogue
-     */
 
     route(
       2,
       0,
-      0.50
+      0.44
     );
 
     route(
       2,
       1,
-      0.50
+      0.44
     );
-
-    /*
-     * LFE
-     */
 
     route(
       3,
       0,
-      0.10
+      0.06
     );
 
     route(
       3,
       1,
-      0.10
+      0.06
     );
-
-    /*
-     * Surround
-     */
 
     route(
       4,
       0,
-      0.50
+      0.34
     );
 
     route(
       5,
       1,
-      0.50
+      0.34
     );
-
-    /*
-     * 7.1 rear
-     */
 
     route(
       6,
       0,
-      0.35
+      0.25
     );
 
     route(
       7,
       1,
-      0.35
+      0.25
     );
 
     merger.connect(
@@ -3913,34 +6155,12 @@ class WatchTogetherApp {
     );
   }
 
-  stopCustomAudioSources() {
-    for (
-      const source
-      of this.customAudioSources
-    ) {
-      try {
-        source.stop();
-
-      } catch {}
-
-      try {
-        source.disconnect();
-
-      } catch {}
-    }
-
-    this.customAudioSources.clear();
-  }
-
-  stopCustomAudioPlayback() {
-    this.customAudioGeneration +=
-      1;
-
+  pauseCustomAudioPlayback() {
     clearInterval(
-      this.customAudioScheduleTimer
+      this.customAudioFillTimer
     );
 
-    this.customAudioScheduleTimer =
+    this.customAudioFillTimer =
       null;
 
     clearTimeout(
@@ -3950,23 +6170,80 @@ class WatchTogetherApp {
     this.customAudioRestartTimer =
       null;
 
-    this.customAudioScheduling =
+    this.postCustomAudio({
+      type:
+        "pause",
+    });
+  }
+
+  stopCustomAudioPlayback(
+    clearBuffer = true
+  ) {
+    this.customAudioGeneration +=
+      1;
+
+    clearInterval(
+      this.customAudioFillTimer
+    );
+
+    this.customAudioFillTimer =
+      null;
+
+    clearTimeout(
+      this.customAudioRestartTimer
+    );
+
+    this.customAudioRestartTimer =
+      null;
+
+    this.customAudioDecoding =
       false;
 
-    this.customAudioScheduledUntil =
-      0;
+    this.postCustomAudio({
+      type:
+        "pause",
+    });
 
-    this.stopCustomAudioSources();
+    if (
+      clearBuffer
+    ) {
+      this.postCustomAudio({
+        type:
+          "clear",
+      });
+
+      this.customAudioPrimed =
+        false;
+
+      this.customAudioDecodeCursor =
+        0;
+
+      this.customAudioBaseMedia =
+        0;
+
+      this.customAudioFramesPushed =
+        0;
+
+      this.customAudioReadFrame =
+        0;
+
+      this.customAudioWriteFrame =
+        0;
+
+      this.customAudioBufferedSeconds =
+        0;
+
+      this.customAudioUnderruns =
+        0;
+    }
   }
 
   restartCustomAudioPlayback(
-    delay =
-      30
+    delay = 30
   ) {
     if (
       !this.customAudioActive ||
-      !this.video ||
-      this.video.paused
+      !this.video
     ) {
       return;
     }
@@ -3978,38 +6255,387 @@ class WatchTogetherApp {
     this.customAudioRestartTimer =
       setTimeout(
         () => {
-          this.startCustomAudioPlayback()
-            .catch(
-              (error) => {
-                console.warn(
-                  "Custom audio restart failed",
-                  error
+          const action =
+            this.video.paused
+              ? this.primeCustomAudio(
+                  this.video.currentTime
+                )
+              : this.startCustomAudioPlayback(
+                  true
                 );
-              }
-            );
+
+          Promise.resolve(
+            action
+          ).catch(
+            (error) => {
+              console.warn(
+                "Custom audio restart failed",
+                error
+              );
+            }
+          );
         },
         delay
       );
   }
 
-  async startCustomAudioPlayback() {
+  async primeCustomAudio(
+    startTime
+  ) {
     if (
       !this.customAudioActive ||
-      !this.customAudioSink ||
-      !this.video ||
-      this.video.paused
+      !this.customAudioSink
     ) {
       return;
     }
 
-    await this.resumeMovieAudio();
-
-    this.stopCustomAudioPlayback();
+    await this.ensureCustomAudioWorklet();
 
     const generation =
       ++this.customAudioGeneration;
 
-    this.customAudioScheduledUntil =
+    clearInterval(
+      this.customAudioFillTimer
+    );
+
+    this.customAudioFillTimer =
+      null;
+
+    this.customAudioDecoding =
+      true;
+
+    this.customAudioPrimed =
+      false;
+
+    this.customAudioDecodeCursor =
+      Math.max(
+        0,
+        Number(
+          startTime ||
+          0
+        )
+      );
+
+    this.customAudioBaseMedia =
+      0;
+
+    this.customAudioFramesPushed =
+      0;
+
+    this.customAudioReadFrame =
+      0;
+
+    this.customAudioWriteFrame =
+      0;
+
+    this.customAudioBufferedSeconds =
+      0;
+
+    this.customAudioUnderruns =
+      0;
+
+    this.postCustomAudio({
+      type:
+        "pause",
+    });
+
+    this.postCustomAudio({
+      type:
+        "clear",
+    });
+
+    const targetSeconds =
+      2.0;
+
+    const endTime =
+      this.customAudioDecodeCursor +
+      3.5;
+
+    let pushedSeconds =
+      0;
+
+    try {
+      for await (
+        const wrapped
+        of this.customAudioSink.buffers(
+          this.customAudioDecodeCursor,
+          endTime
+        )
+      ) {
+        if (
+          generation !==
+          this.customAudioGeneration
+        ) {
+          return;
+        }
+
+        const added =
+          this.pushDecodedAudioBuffer(
+            wrapped,
+            this.customAudioDecodeCursor,
+            this.customAudioFramesPushed ===
+              0
+          );
+
+        pushedSeconds +=
+          added;
+
+        if (
+          pushedSeconds >=
+          targetSeconds
+        ) {
+          break;
+        }
+      }
+
+      if (
+        generation !==
+        this.customAudioGeneration
+      ) {
+        return;
+      }
+
+      if (
+        this.customAudioFramesPushed <=
+        0
+      ) {
+        throw new Error(
+          "No decoded audio frames were returned for this position"
+        );
+      }
+
+      this.customAudioPrimed =
+        true;
+
+    } finally {
+      if (
+        generation ===
+        this.customAudioGeneration
+      ) {
+        this.customAudioDecoding =
+          false;
+      }
+    }
+  }
+
+  pushDecodedAudioBuffer(
+    wrapped,
+    minimumTimestamp,
+    firstBuffer = false
+  ) {
+    const {
+      buffer,
+      timestamp,
+      duration,
+    } =
+      wrapped;
+
+    if (
+      !buffer ||
+      !buffer.length ||
+      !buffer.sampleRate
+    ) {
+      return 0;
+    }
+
+    const sourceRate =
+      Number(
+        buffer.sampleRate
+      );
+
+    const channelCount =
+      Math.min(
+        8,
+        Math.max(
+          1,
+          Number(
+            buffer.numberOfChannels ||
+            1
+          )
+        )
+      );
+
+    let trimFrames =
+      Math.max(
+        0,
+        Math.floor(
+          (
+            Number(
+              minimumTimestamp ||
+              0
+            ) -
+            Number(
+              timestamp ||
+              0
+            )
+          ) *
+            sourceRate
+        )
+      );
+
+    trimFrames =
+      Math.min(
+        trimFrames,
+        Math.max(
+          0,
+          buffer.length -
+          1
+        )
+      );
+
+    const frames =
+      buffer.length -
+      trimFrames;
+
+    if (
+      frames <= 0
+    ) {
+      this.customAudioDecodeCursor =
+        Math.max(
+          this.customAudioDecodeCursor,
+
+          Number(
+            timestamp ||
+            0
+          ) +
+            Number(
+              duration ||
+              0
+            )
+        );
+
+      return 0;
+    }
+
+    if (
+      firstBuffer
+    ) {
+      this.customAudioSourceSampleRate =
+        sourceRate;
+
+      this.customAudioChannelCount =
+        channelCount;
+
+      this.customAudioBaseMedia =
+        Number(
+          timestamp ||
+          0
+        ) +
+        trimFrames /
+          sourceRate;
+
+      this.postCustomAudio({
+        type:
+          "reset",
+
+        sourceSampleRate:
+          sourceRate,
+
+        channelCount,
+      });
+
+    } else if (
+      Math.abs(
+        sourceRate -
+        this.customAudioSourceSampleRate
+      ) >
+      1
+    ) {
+      throw new Error(
+        "Audio sample rate changed during playback"
+      );
+    }
+
+    const channelArrays =
+      [];
+
+    const transfers =
+      [];
+
+    for (
+      let channel = 0;
+      channel <
+        channelCount;
+      channel += 1
+    ) {
+      const copied =
+        buffer
+          .getChannelData(
+            channel
+          )
+          .slice(
+            trimFrames
+          );
+
+      channelArrays.push(
+        copied.buffer
+      );
+
+      transfers.push(
+        copied.buffer
+      );
+    }
+
+    this.postCustomAudio(
+      {
+        type:
+          "push",
+
+        channels:
+          channelArrays,
+
+        frames,
+
+        channelCount,
+
+        sourceSampleRate:
+          sourceRate,
+      },
+      transfers
+    );
+
+    this.customAudioFramesPushed +=
+      frames;
+
+    this.customAudioWriteFrame =
+      this.customAudioFramesPushed;
+
+    this.customAudioDecodeCursor =
+      Math.max(
+        this.customAudioDecodeCursor,
+
+        Number(
+          timestamp ||
+          0
+        ) +
+          Number(
+            duration ||
+            0
+          )
+      );
+
+    return (
+      frames /
+      sourceRate
+    );
+  }
+
+  async startCustomAudioPlayback(
+    forcePrime = false
+  ) {
+    if (
+      !this.customAudioActive ||
+      !this.customAudioSink ||
+      !this.video
+    ) {
+      return;
+    }
+
+    await this.ensureCustomAudioWorklet();
+
+    await this.resumeMovieAudio();
+
+    let mediaNow =
       Math.max(
         0,
         Number(
@@ -4018,34 +6644,137 @@ class WatchTogetherApp {
         )
       );
 
-    await this.fillCustomAudioBuffer(
-      generation
-    );
+    const desiredFrameForNow =
+      () =>
+        (
+          mediaNow -
+          this.customAudioBaseMedia
+        ) *
+        this.customAudioSourceSampleRate;
 
     if (
-      generation !==
-      this.customAudioGeneration
+      forcePrime ||
+      !this.customAudioPrimed ||
+      !this.customAudioFramesPushed ||
+      desiredFrameForNow() <
+        0 ||
+      desiredFrameForNow() >
+        this.customAudioFramesPushed -
+          this.customAudioSourceSampleRate *
+            0.18
+    ) {
+      await this.primeCustomAudio(
+        mediaNow
+      );
+
+      mediaNow =
+        Math.max(
+          0,
+          Number(
+            this.video.currentTime ||
+            0
+          )
+        );
+    }
+
+    if (
+      !this.customAudioPrimed
     ) {
       return;
     }
 
-    this.customAudioScheduleTimer =
+    let desiredFrame =
+      (
+        mediaNow -
+        this.customAudioBaseMedia
+      ) *
+      this.customAudioSourceSampleRate;
+
+    if (
+      desiredFrame <
+        0 ||
+      desiredFrame >
+        this.customAudioFramesPushed -
+          this.customAudioSourceSampleRate *
+            0.12
+    ) {
+      await this.primeCustomAudio(
+        mediaNow
+      );
+
+      mediaNow =
+        Math.max(
+          0,
+          Number(
+            this.video.currentTime ||
+            0
+          )
+        );
+
+      desiredFrame =
+        (
+          mediaNow -
+          this.customAudioBaseMedia
+        ) *
+        this.customAudioSourceSampleRate;
+    }
+
+    desiredFrame =
+      clamp(
+        desiredFrame,
+        0,
+        Math.max(
+          0,
+          this.customAudioFramesPushed -
+            2
+        )
+      );
+
+    this.customAudioReadFrame =
+      desiredFrame;
+
+    this.postCustomAudio({
+      type:
+        "seek",
+
+      frame:
+        desiredFrame,
+    });
+
+    this.updateCustomAudioRate();
+
+    this.postCustomAudio({
+      type:
+        "start",
+    });
+
+    const generation =
+      this.customAudioGeneration;
+
+    clearInterval(
+      this.customAudioFillTimer
+    );
+
+    this.customAudioFillTimer =
       setInterval(
         () => {
           this.fillCustomAudioBuffer(
             generation
-          )
-            .catch(
-              (error) => {
-                console.warn(
-                  "Custom audio scheduling failed",
-                  error
-                );
-              }
-            );
+          ).catch(
+            (error) => {
+              console.warn(
+                "Custom audio worklet refill failed",
+                error
+              );
+            }
+          );
         },
-        450
+        200
       );
+
+    await this.fillCustomAudioBuffer(
+      generation
+    );
   }
 
   async fillCustomAudioBuffer(
@@ -4054,75 +6783,56 @@ class WatchTogetherApp {
     if (
       generation !==
         this.customAudioGeneration ||
-      this.customAudioScheduling ||
+      this.customAudioDecoding ||
+      !this.customAudioActive ||
+      !this.customAudioPrimed ||
       !this.customAudioSink ||
-      !this.customAudioInput ||
-      !this.audioContext ||
-      !this.video ||
-      this.video.paused
+      !this.customAudioNode
     ) {
       return;
     }
 
-    this.customAudioScheduling =
+    this.syncCustomAudioToVideo();
+
+    const estimatedBuffered =
+      Math.max(
+        0,
+        (
+          this.customAudioFramesPushed -
+          this.customAudioReadFrame
+        ) /
+          Math.max(
+            1,
+            this.customAudioSourceSampleRate
+          )
+      );
+
+    const buffered =
+      Math.max(
+        this.customAudioBufferedSeconds,
+        estimatedBuffered
+      );
+
+    if (
+      buffered >=
+      3.2
+    ) {
+      return;
+    }
+
+    this.customAudioDecoding =
       true;
 
     try {
-      const mediaNow =
-        Number(
-          this.video.currentTime ||
-          0
-        );
-
-      const rate =
-        Math.max(
-          0.25,
-          Number(
-            this.video.playbackRate ||
-            1
-          )
-        );
-
-      /*
-       * Video may jump after:
-       *
-       * - seek
-       * - host synchronization
-       * - drift hard correction
-       */
-
-      if (
-        this.customAudioScheduledUntil <
-          mediaNow -
-            0.35 ||
-        this.customAudioScheduledUntil >
-          mediaNow +
-            5.0
-      ) {
-        this.stopCustomAudioSources();
-
-        this.customAudioScheduledUntil =
-          mediaNow;
-      }
-
       const start =
         Math.max(
-          mediaNow -
-            0.03,
-          this.customAudioScheduledUntil
+          0,
+          this.customAudioDecodeCursor
         );
 
       const end =
-        mediaNow +
-        3.0;
-
-      if (
-        start >=
-        end -
-          0.04
-      ) {
-        return;
-      }
+        start +
+        2.6;
 
       for await (
         const wrapped
@@ -4133,141 +6843,197 @@ class WatchTogetherApp {
       ) {
         if (
           generation !==
-            this.customAudioGeneration ||
-          this.video.paused
+          this.customAudioGeneration
         ) {
-          break;
+          return;
         }
 
-        const {
-          buffer,
-          timestamp,
-          duration,
-        } =
-          wrapped;
-
         const bufferEnd =
-          timestamp +
-          duration;
+          Number(
+            wrapped.timestamp ||
+            0
+          ) +
+          Number(
+            wrapped.duration ||
+            0
+          );
 
         if (
           bufferEnd <=
-          mediaNow -
-            0.02
+          this.customAudioDecodeCursor +
+            0.000001
         ) {
           continue;
         }
 
-        const source =
-          this.audioContext
-            .createBufferSource();
-
-        source.buffer =
-          buffer;
-
-        source.playbackRate.value =
-          rate;
-
-        source.connect(
-          this.customAudioInput
+        this.pushDecodedAudioBuffer(
+          wrapped,
+          this.customAudioDecodeCursor,
+          false
         );
 
-        this.customAudioSources.add(
-          source
-        );
-
-        source.onended =
-          () => {
-            this.customAudioSources.delete(
-              source
-            );
-
-            try {
-              source.disconnect();
-
-            } catch {}
-          };
-
-        /*
-         * Calculate against live video clock.
-         */
-
-        const liveMediaNow =
-          Number(
-            this.video.currentTime ||
-            0
-          );
-
-        const offset =
-          Math.max(
-            0,
-            liveMediaNow -
-              timestamp
-          );
-
-        const when =
-          this.audioContext.currentTime +
+        const queuedSeconds =
           Math.max(
             0,
             (
-              timestamp -
-              liveMediaNow
+              this.customAudioFramesPushed -
+              this.customAudioReadFrame
             ) /
-              rate
-          );
-
-        try {
-          source.start(
-            when,
-            Math.min(
-              offset,
               Math.max(
-                0,
-                buffer.duration -
-                  0.001
+                1,
+                this.customAudioSourceSampleRate
               )
-            )
           );
 
-          this.customAudioScheduledUntil =
-            Math.max(
-              this.customAudioScheduledUntil,
-              bufferEnd
-            );
-
-        } catch (error) {
-          this.customAudioSources.delete(
-            source
-          );
-
-          try {
-            source.disconnect();
-
-          } catch {}
-
-          console.warn(
-            "Could not schedule decoded audio buffer",
-            error
-          );
+        if (
+          queuedSeconds >=
+          4.5
+        ) {
+          break;
         }
       }
 
     } finally {
-      this.customAudioScheduling =
-        false;
+      if (
+        generation ===
+        this.customAudioGeneration
+      ) {
+        this.customAudioDecoding =
+          false;
+      }
     }
   }
 
-  codecDisplayName(codec) {
+    updateCustomAudioRate() {
+    if (
+      !this.customAudioActive ||
+      !this.video ||
+      !this.customAudioNode
+    ) {
+      return;
+    }
+
+    const baseRate =
+      Math.max(
+        0.25,
+        Number(
+          this.video.playbackRate ||
+          1
+        )
+      );
+
+    let correction =
+      1;
+
+    if (
+      this.customAudioPrimed &&
+      this.customAudioSourceSampleRate >
+        0
+    ) {
+      const audioMediaTime =
+        this.customAudioBaseMedia +
+        this.customAudioReadFrame /
+          this.customAudioSourceSampleRate;
+
+      const drift =
+        Number(
+          this.video.currentTime ||
+          0
+        ) -
+        audioMediaTime;
+
+      correction =
+        clamp(
+          1 +
+            drift *
+              0.035,
+          0.99,
+          1.01
+        );
+    }
+
+    this.postCustomAudio({
+      type:
+        "rate",
+
+      rate:
+        baseRate *
+        correction,
+    });
+  }
+
+  syncCustomAudioToVideo() {
+    if (
+      !this.customAudioActive ||
+      !this.customAudioPrimed ||
+      !this.video ||
+      this.video.paused ||
+      !this.customAudioSourceSampleRate
+    ) {
+      return;
+    }
+
+    const audioMediaTime =
+      this.customAudioBaseMedia +
+      this.customAudioReadFrame /
+        this.customAudioSourceSampleRate;
+
+    const drift =
+      Number(
+        this.video.currentTime ||
+        0
+      ) -
+      audioMediaTime;
+
+    if (
+      Math.abs(
+        drift
+      ) >
+        0.24 &&
+      Date.now() -
+        this.customAudioLastResyncAt >
+        1200
+    ) {
+      this.customAudioLastResyncAt =
+        Date.now();
+
+      this.restartCustomAudioPlayback(
+        20
+      );
+
+      return;
+    }
+
+    this.updateCustomAudioRate();
+  }
+
+  codecDisplayName(
+    codec
+  ) {
     const names = {
-      aac: "AAC",
-      opus: "Opus",
-      mp3: "MP3",
-      vorbis: "Vorbis",
-      flac: "FLAC",
-      ac3: "AC-3",
-      eac3: "E-AC-3",
-      dts: "DTS",
+      aac:
+        "AAC",
+
+      opus:
+        "Opus",
+
+      mp3:
+        "MP3",
+
+      vorbis:
+        "Vorbis",
+
+      flac:
+        "FLAC",
+
+      ac3:
+        "AC-3",
+
+      eac3:
+        "E-AC-3",
+
+      dts:
+        "DTS",
     };
 
     return (
@@ -4336,17 +7102,15 @@ class WatchTogetherApp {
 
     return (
       parts
-        .filter(Boolean)
-        .join(" · ") ||
+        .filter(
+          Boolean
+        )
+        .join(
+          " · "
+        ) ||
       `Audio ${index + 1}`
     );
   }
-
-  /*
-   * ============================================================
-   * NATIVE MOVIE AUDIO
-   * ============================================================
-   */
 
   async setupMovieAudio() {
     if (
@@ -4385,7 +7149,8 @@ class WatchTogetherApp {
 
         this.movieAudioSource
           ?.connect(
-            this.audioContext.destination
+            this.audioContext
+              .destination
           );
 
       } catch {}
@@ -4400,20 +7165,25 @@ class WatchTogetherApp {
   async resumeMovieAudio() {
     try {
       if (
-        this.audioContext?.state ===
+        this.audioContext
+          ?.state ===
         "suspended"
       ) {
-        await this.audioContext.resume();
+        await this.audioContext
+          .resume();
       }
 
     } catch {}
   }
 
-  setMovieVolume(value) {
+  setMovieVolume(
+    value
+  ) {
     this.movieVolume =
       clamp(
-        Number(value) ||
-          0,
+        Number(
+          value
+        ) || 0,
         0,
         1
       );
@@ -4426,7 +7196,8 @@ class WatchTogetherApp {
         .gain
         .setTargetAtTime(
           this.movieVolume,
-          this.audioContext.currentTime,
+          this.audioContext
+            .currentTime,
           0.01
         );
 
@@ -4438,9 +7209,12 @@ class WatchTogetherApp {
     }
   }
 
-  async setMovieAudioMode(mode) {
+  async setMovieAudioMode(
+    mode
+  ) {
     this.movieAudioMode =
-      mode === "native"
+      mode ===
+      "native"
         ? "native"
         : "compat";
 
@@ -4449,32 +7223,27 @@ class WatchTogetherApp {
     if (
       this.customAudioActive
     ) {
+      /*
+       * Do not restart decoder.
+       * Only reconnect output graph.
+       */
+
       this.buildCustomAudioOutputGraph();
 
-      if (
-        this.video &&
-        !this.video.paused
-      ) {
-        this.restartCustomAudioPlayback(
-          20
-        );
-      }
+    } else if (
+      !this.movieAudioSource
+    ) {
+      await this.setupMovieAudio();
 
     } else {
-      if (
-        !this.movieAudioSource
-      ) {
-        await this.setupMovieAudio();
-
-      } else {
-        await this.rebuildMovieAudioGraph(
-          this.movieAudioMode
-        );
-      }
+      await this.rebuildMovieAudioGraph(
+        this.movieAudioMode
+      );
     }
 
     this.toast(
-      this.movieAudioMode === "compat"
+      this.movieAudioMode ===
+        "compat"
         ? "Stereo Compatibility enabled — surround music and effects are mixed into stereo."
         : "Native movie audio enabled.",
       "good"
@@ -4505,7 +7274,9 @@ class WatchTogetherApp {
       null;
   }
 
-  async rebuildMovieAudioGraph(mode) {
+  async rebuildMovieAudioGraph(
+    mode
+  ) {
     if (
       !this.audioContext ||
       !this.movieAudioSource
@@ -4532,11 +7303,13 @@ class WatchTogetherApp {
     );
 
     if (
-      mode === "native"
+      mode ===
+      "native"
     ) {
-      this.movieAudioSource.connect(
-        master
-      );
+      this.movieAudioSource
+        .connect(
+          master
+        );
 
       master.connect(
         ctx.destination
@@ -4559,19 +7332,25 @@ class WatchTogetherApp {
       ctx.createDynamicsCompressor();
 
     compressor.threshold.value =
-      -10;
+      -3;
 
     compressor.knee.value =
-      12;
+      6;
 
     compressor.ratio.value =
-      4;
+      2;
 
     compressor.attack.value =
-      0.003;
+      0.006;
 
     compressor.release.value =
-      0.25;
+      0.14;
+
+    splitter.channelInterpretation =
+      "discrete";
+
+    merger.channelInterpretation =
+      "discrete";
 
     this.movieAudioNodes.push(
       splitter,
@@ -4614,61 +7393,61 @@ class WatchTogetherApp {
     route(
       0,
       0,
-      0.70
+      0.62
     );
 
     route(
       1,
       1,
-      0.70
+      0.62
     );
 
     route(
       2,
       0,
-      0.50
+      0.44
     );
 
     route(
       2,
       1,
-      0.50
+      0.44
     );
 
     route(
       3,
       0,
-      0.10
+      0.06
     );
 
     route(
       3,
       1,
-      0.10
+      0.06
     );
 
     route(
       4,
       0,
-      0.50
+      0.34
     );
 
     route(
       5,
       1,
-      0.50
+      0.34
     );
 
     route(
       6,
       0,
-      0.35
+      0.25
     );
 
     route(
       7,
       1,
-      0.35
+      0.25
     );
 
     merger.connect(
@@ -4685,7 +7464,9 @@ class WatchTogetherApp {
   }
 
   cleanupMovieAudio() {
-    this.stopCustomAudioPlayback();
+    this.stopCustomAudioPlayback(
+      true
+    );
 
     this.customAudioActive =
       false;
@@ -4694,6 +7475,30 @@ class WatchTogetherApp {
       null;
 
     this.customAudioInput =
+      null;
+
+    if (
+      this.customAudioNode
+    ) {
+      try {
+        this.customAudioNode
+          .port
+          .onmessage =
+          null;
+
+      } catch {}
+
+      try {
+        this.customAudioNode
+          .disconnect();
+
+      } catch {}
+    }
+
+    this.customAudioNode =
+      null;
+
+    this.customAudioWorkletPromise =
       null;
 
     this.disconnectMovieAudioGraph();
@@ -4709,7 +7514,8 @@ class WatchTogetherApp {
 
     try {
       this.mediaInput
-        ?.dispose?.();
+        ?.dispose
+        ?.();
 
     } catch {}
 
@@ -4736,7 +7542,8 @@ class WatchTogetherApp {
 
     if (
       ctx &&
-      ctx.state !== "closed"
+      ctx.state !==
+        "closed"
     ) {
       try {
         ctx.close();
@@ -4745,19 +7552,20 @@ class WatchTogetherApp {
     }
   }
 
-  /*
-   * ============================================================
-   * LANGUAGE SELECTOR
-   * ============================================================
-   */
-
-  languageName(code = "") {
+  languageName(
+    code = ""
+  ) {
     const normalized =
-      String(code || "")
+      String(
+        code ||
+        ""
+      )
         .trim()
         .toLowerCase();
 
-    if (!normalized) {
+    if (
+      !normalized
+    ) {
       return "";
     }
 
@@ -4830,7 +7638,9 @@ class WatchTogetherApp {
     };
 
     if (
-      common[normalized]
+      common[
+        normalized
+      ]
     ) {
       return common[
         normalized
@@ -4845,7 +7655,8 @@ class WatchTogetherApp {
             "en",
           ],
           {
-            type: "language",
+            type:
+              "language",
           }
         );
 
@@ -4853,26 +7664,30 @@ class WatchTogetherApp {
         display.of(
           normalized
         ) ||
-        normalized.toUpperCase()
+        normalized
+          .toUpperCase()
       );
 
     } catch {
-      return normalized.toUpperCase();
+      return normalized
+        .toUpperCase();
     }
   }
 
-  audioTrackLabel(
+    audioTrackLabel(
     track,
     index
   ) {
     const language =
       this.languageName(
-        track?.language || ""
+        track?.language ||
+        ""
       );
 
     const rawLabel =
       String(
-        track?.label || ""
+        track?.label ||
+        ""
       ).trim();
 
     if (
@@ -4881,17 +7696,22 @@ class WatchTogetherApp {
       !rawLabel
         .toLowerCase()
         .includes(
-          language.toLowerCase()
+          language
+            .toLowerCase()
         )
     ) {
       return `${language} · ${rawLabel}`;
     }
 
-    if (language) {
+    if (
+      language
+    ) {
       return language;
     }
 
-    if (rawLabel) {
+    if (
+      rawLabel
+    ) {
       return rawLabel;
     }
 
@@ -4908,54 +7728,50 @@ class WatchTogetherApp {
       return;
     }
 
-    /*
-     * Preferred universal path.
-     *
-     * Mediabunny reads MKV container itself,
-     * so we are not dependent on Chrome audioTracks.
-     */
-
     if (
       this.mediaAudioReady &&
-      this.mediaAudioTrackInfo.length
+      this.mediaAudioTrackInfo
+        .length
     ) {
       const options =
-        this.mediaAudioTrackInfo.map(
-          (
-            info,
-            index
-          ) => {
-            const label =
-              this.universalAudioTrackLabel(
-                info,
-                index
-              );
+        this.mediaAudioTrackInfo
+          .map(
+            (
+              info,
+              index
+            ) => {
+              const label =
+                this.universalAudioTrackLabel(
+                  info,
+                  index
+                );
 
-            return `
-              <option
-                value="${index}"
-                ${
-                  info.canDecode
-                    ? ""
-                    : "disabled"
-                }
-              >
-                ${esc(label)}
-                ${
-                  info.canDecode
-                    ? ""
-                    : " · unsupported"
-                }
-              </option>
-            `;
-          }
-        );
+              return `
+                <option
+                  value="${index}"
+                  ${
+                    info.canDecode
+                      ? ""
+                      : "disabled"
+                  }
+                >
+                  ${esc(label)}
+                  ${
+                    info.canDecode
+                      ? ""
+                      : " · unsupported"
+                  }
+                </option>
+              `;
+            }
+          );
 
       select.innerHTML =
         options.join("");
 
       select.disabled =
-        this.mediaAudioTrackInfo.length <
+        this.mediaAudioTrackInfo
+          .length <
         2;
 
       select.value =
@@ -4963,23 +7779,21 @@ class WatchTogetherApp {
           clamp(
             this.selectedAudioTrackIndex,
             0,
-            this.mediaAudioTrackInfo.length -
+            this.mediaAudioTrackInfo
+              .length -
               1
           )
         );
 
       select.title =
-        this.mediaAudioTrackInfo.length >
+        this.mediaAudioTrackInfo
+          .length >
         1
           ? "Choose your personal movie audio language. This does not change other participants' audio."
           : "This movie contains one audio track.";
 
       return;
     }
-
-    /*
-     * Loading indicator.
-     */
 
     if (
       this.mediaAudioInitPromise &&
@@ -4997,12 +7811,9 @@ class WatchTogetherApp {
       return;
     }
 
-    /*
-     * Browser-native fallback.
-     */
-
     const tracks =
-      this.video?.audioTracks;
+      this.video
+        ?.audioTracks;
 
     if (
       !tracks ||
@@ -5036,7 +7847,8 @@ class WatchTogetherApp {
 
     for (
       let i = 0;
-      i < tracks.length;
+      i <
+        tracks.length;
       i += 1
     ) {
       const track =
@@ -5091,19 +7903,19 @@ class WatchTogetherApp {
       );
   }
 
-  async selectAudioTrack(index) {
-    /*
-     * Universal local track path.
-     */
-
+  async selectAudioTrack(
+    index
+  ) {
     if (
       this.mediaAudioReady &&
-      this.mediaAudioTrackInfo.length
+      this.mediaAudioTrackInfo
+        .length
     ) {
       if (
         index < 0 ||
         index >=
-          this.mediaAudioTrackInfo.length
+          this.mediaAudioTrackInfo
+            .length
       ) {
         return;
       }
@@ -5116,21 +7928,21 @@ class WatchTogetherApp {
       return;
     }
 
-    /*
-     * Native browser fallback.
-     */
-
-    if (!this.video) {
+    if (
+      !this.video
+    ) {
       return;
     }
 
     const tracks =
-      this.video.audioTracks;
+      this.video
+        .audioTracks;
 
     if (
       !tracks ||
       index < 0 ||
-      index >= tracks.length
+      index >=
+        tracks.length
     ) {
       this.toast(
         "This movie audio track is not available.",
@@ -5143,11 +7955,13 @@ class WatchTogetherApp {
     try {
       for (
         let i = 0;
-        i < tracks.length;
+        i <
+          tracks.length;
         i += 1
       ) {
         tracks[i].enabled =
-          i === index;
+          i ===
+          index;
       }
 
       this.selectedAudioTrackIndex =
@@ -5181,12 +7995,6 @@ class WatchTogetherApp {
     }
   }
 
-  /*
-   * ============================================================
-   * PLAYBACK SYNCHRONIZATION
-   * ============================================================
-   */
-
   updatePlayIcon() {
     const btn =
       this.root.querySelector(
@@ -5217,7 +8025,8 @@ class WatchTogetherApp {
       setInterval(
         () => {
           if (
-            this.phase !== "watch" ||
+            this.phase !==
+              "watch" ||
             !this.video
           ) {
             return;
@@ -5243,7 +8052,8 @@ class WatchTogetherApp {
       setInterval(
         () => {
           if (
-            this.phase !== "watch" ||
+            this.phase !==
+              "watch" ||
             !this.video
           ) {
             return;
@@ -5259,7 +8069,9 @@ class WatchTogetherApp {
               "#timeline"
             );
 
-          if (current) {
+          if (
+            current
+          ) {
             current.textContent =
               formatTime(
                 this.video.currentTime
@@ -5287,7 +8099,9 @@ class WatchTogetherApp {
   }
 
   playbackState() {
-    if (!this.video) {
+    if (
+      !this.video
+    ) {
       return null;
     }
 
@@ -5326,8 +8140,7 @@ class WatchTogetherApp {
   }
 
   broadcastPlayback(
-    reason =
-      "update"
+    reason = "update"
   ) {
     if (
       !this.isHost ||
@@ -5340,7 +8153,9 @@ class WatchTogetherApp {
     const state =
       this.playbackState();
 
-    if (!state) {
+    if (
+      !state
+    ) {
       return;
     }
 
@@ -5405,7 +8220,9 @@ class WatchTogetherApp {
         0
       );
 
-    if (state.playing) {
+    if (
+      state.playing
+    ) {
       const estimatedHostNow =
         Date.now() +
         this.clockOffset;
@@ -5443,7 +8260,9 @@ class WatchTogetherApp {
     );
   }
 
-  async applySync(immediate) {
+  async applySync(
+    immediate
+  ) {
     if (
       this.isHost ||
       !this.video ||
@@ -5502,7 +8321,8 @@ class WatchTogetherApp {
       );
 
     if (
-      abs > 0.5 &&
+      abs >
+        0.5 &&
       Date.now() >
         this.seekCooldownUntil
     ) {
@@ -5525,12 +8345,13 @@ class WatchTogetherApp {
 
     } else if (
       state.playing &&
-      abs >= 0.10
+      abs >=
+        0.10
     ) {
       const correction =
         clamp(
           drift *
-            0.08,
+          0.08,
           -0.04,
           0.04
         );
@@ -5538,23 +8359,24 @@ class WatchTogetherApp {
       this.video.playbackRate =
         clamp(
           baseRate +
-            correction,
+          correction,
 
           Math.max(
             0.25,
             baseRate *
-              0.96
+            0.96
           ),
 
           Math.min(
             2,
             baseRate *
-              1.04
+            1.04
           )
         );
 
     } else if (
-      abs < 0.07 &&
+      abs <
+        0.07 &&
       Math.abs(
         this.video.playbackRate -
         baseRate
@@ -5576,7 +8398,9 @@ class WatchTogetherApp {
       return;
     }
 
-    if (this.isHost) {
+    if (
+      this.isHost
+    ) {
       this.syncLabel =
         "✓ Host · authoritative playback";
 
@@ -5592,12 +8416,16 @@ class WatchTogetherApp {
           this.driftMs
         );
 
-      if (abs < 100) {
+      if (
+        abs <
+        100
+      ) {
         this.syncLabel =
           "✓ Synced";
 
       } else if (
-        this.driftMs > 0
+        this.driftMs >
+        0
       ) {
         this.syncLabel =
           `⚠ ${abs}ms behind`;
@@ -5618,14 +8446,19 @@ class WatchTogetherApp {
         "#sync-now"
       );
 
-    if (btn) {
-      btn.disabled = true;
+    if (
+      btn
+    ) {
+      btn.disabled =
+        true;
 
       btn.textContent =
         "Syncing…";
     }
 
-    if (this.isHost) {
+    if (
+      this.isHost
+    ) {
       this.broadcastPlayback(
         "sync-now"
       );
@@ -5652,7 +8485,9 @@ class WatchTogetherApp {
       );
     }
 
-    if (btn) {
+    if (
+      btn
+    ) {
       btn.disabled =
         false;
 
@@ -5661,7 +8496,9 @@ class WatchTogetherApp {
 
       setTimeout(
         () => {
-          if (btn) {
+          if (
+            btn
+          ) {
             btn.textContent =
               "↻ Sync Now";
           }
@@ -5671,7 +8508,9 @@ class WatchTogetherApp {
     }
   }
 
-  onStateRequest(payload) {
+  onStateRequest(
+    payload
+  ) {
     if (
       !this.isHost ||
       !payload?.from ||
@@ -5687,8 +8526,7 @@ class WatchTogetherApp {
   }
 
   async syncClock(
-    force =
-      false
+    force = false
   ) {
     if (
       this.isHost ||
@@ -5812,7 +8650,7 @@ class WatchTogetherApp {
       Math.max(
         0,
         t2 -
-          t0
+        t0
       );
 
     const offset =
@@ -5839,14 +8677,17 @@ class WatchTogetherApp {
       );
 
     const best =
-      [...this.clockSamples]
-        .sort(
-          (a, b) =>
-            a.rtt -
-            b.rtt
-        )[0];
+      [
+        ...this.clockSamples,
+      ].sort(
+        (a, b) =>
+          a.rtt -
+          b.rtt
+      )[0];
 
-    if (best) {
+    if (
+      best
+    ) {
       this.clockOffset =
         best.offset;
 
@@ -5854,12 +8695,6 @@ class WatchTogetherApp {
         best.rtt;
     }
   }
-
-  /*
-   * ============================================================
-   * CHAT
-   * ============================================================
-   */
 
   sendChat(event) {
     event.preventDefault();
@@ -5880,7 +8715,9 @@ class WatchTogetherApp {
           500
         );
 
-    if (!text) {
+    if (
+      !text
+    ) {
       return;
     }
 
@@ -5996,23 +8833,26 @@ class WatchTogetherApp {
                         new Date(
                           m.ts ||
                           Date.now()
-                        ).toLocaleTimeString(
-                          [],
-                          {
-                            hour:
-                              "2-digit",
-
-                            minute:
-                              "2-digit",
-                          }
                         )
+                          .toLocaleTimeString(
+                            [],
+                            {
+                              hour:
+                                "2-digit",
+
+                              minute:
+                                "2-digit",
+                            }
+                          )
                       }
                     </time>
 
                   </div>
 
                   <p>
-                    ${esc(m.text)}
+                    ${esc(
+                      m.text
+                    )}
                   </p>
 
                 </div>
@@ -6033,13 +8873,7 @@ class WatchTogetherApp {
       box.scrollHeight;
   }
 
-  /*
-   * ============================================================
-   * WEBRTC
-   * ============================================================
-   */
-
-  iceServers() {
+    iceServers() {
     const servers =
       [];
 
@@ -6050,9 +8884,13 @@ class WatchTogetherApp {
         ? this.config.stunUrls
         : [
             this.config.stunUrls,
-          ].filter(Boolean);
+          ].filter(
+            Boolean
+          );
 
-    if (stun.length) {
+    if (
+      stun.length
+    ) {
       servers.push({
         urls:
           stun,
@@ -6081,7 +8919,9 @@ class WatchTogetherApp {
 
   ensurePC(peerId) {
     if (
-      this.pcs.has(peerId)
+      this.pcs.has(
+        peerId
+      )
     ) {
       return this.pcs.get(
         peerId
@@ -6107,10 +8947,13 @@ class WatchTogetherApp {
       []
     );
 
-    if (this.localStream) {
+    if (
+      this.localStream
+    ) {
       for (
         const track
-        of this.localStream.getTracks()
+        of this.localStream
+          .getTracks()
       ) {
         pc.addTrack(
           track,
@@ -6137,7 +8980,9 @@ class WatchTogetherApp {
                 "candidate",
 
               candidate:
-                event.candidate.toJSON?.() ||
+                event.candidate
+                  .toJSON
+                  ?.() ||
                 event.candidate,
             }
           );
@@ -6147,7 +8992,8 @@ class WatchTogetherApp {
     pc.ontrack =
       (event) => {
         const stream =
-          event.streams?.[0] ||
+          event.streams
+            ?.[0] ||
           new MediaStream(
             [
               event.track,
@@ -6188,9 +9034,10 @@ class WatchTogetherApp {
           );
 
           if (
-            this.peerId.localeCompare(
-              peerId
-            ) < 0
+            this.peerId
+              .localeCompare(
+                peerId
+              ) < 0
           ) {
             setTimeout(
               () =>
@@ -6217,8 +9064,7 @@ class WatchTogetherApp {
 
   async makeOffer(
     peerId,
-    iceRestart =
-      false
+    iceRestart = false
   ) {
     const pc =
       this.ensurePC(
@@ -6367,7 +9213,9 @@ class WatchTogetherApp {
 
         } else {
           this.iceQueues
-            .get(peerId)
+            .get(
+              peerId
+            )
             ?.push(
               payload.candidate
             );
@@ -6391,7 +9239,8 @@ class WatchTogetherApp {
     const queue =
       this.iceQueues.get(
         peerId
-      ) || [];
+      ) ||
+      [];
 
     while (
       pc?.remoteDescription &&
@@ -6419,9 +9268,11 @@ class WatchTogetherApp {
     }
 
     if (
-      this.peerId.localeCompare(
-        payload.from
-      ) < 0
+      this.peerId
+        .localeCompare(
+          payload.from
+        ) <
+      0
     ) {
       this.makeOffer(
         payload.from
@@ -6431,9 +9282,11 @@ class WatchTogetherApp {
 
   async restartIce(peerId) {
     if (
-      this.peerId.localeCompare(
-        peerId
-      ) < 0
+      this.peerId
+        .localeCompare(
+          peerId
+        ) <
+      0
     ) {
       await this.makeOffer(
         peerId,
@@ -6455,7 +9308,9 @@ class WatchTogetherApp {
   }
 
   ensureLocalStream() {
-    if (!this.localStream) {
+    if (
+      !this.localStream
+    ) {
       this.localStream =
         new MediaStream();
     }
@@ -6464,8 +9319,7 @@ class WatchTogetherApp {
   }
 
   audioConstraints(
-    deviceId =
-      ""
+    deviceId = ""
   ) {
     const constraints = {
       echoCancellation: {
@@ -6494,7 +9348,9 @@ class WatchTogetherApp {
       },
     };
 
-    if (deviceId) {
+    if (
+      deviceId
+    ) {
       constraints.deviceId = {
         exact:
           deviceId,
@@ -6505,21 +9361,21 @@ class WatchTogetherApp {
   }
 
   looksLikeBluetoothMic(
-    label =
-      ""
+    label = ""
   ) {
-    return /(bluetooth|hands[- ]?free|headset|airpods|buds|earbuds|galaxy buds|wh-|wf-)/i.test(
-      label
-    );
+    return /(bluetooth|hands[- ]?free|headset|airpods|buds|earbuds|galaxy buds|wh-|wf-)/i
+      .test(
+        label
+      );
   }
 
   looksLikeBuiltInMic(
-    label =
-      ""
+    label = ""
   ) {
-    return /(built[- ]?in|internal|microphone array|integrated|realtek|macbook|macbook pro|macbook air|internal microphone)/i.test(
-      label
-    );
+    return /(built[- ]?in|internal|microphone array|integrated|realtek|macbook|macbook pro|macbook air|internal microphone)/i
+      .test(
+        label
+      );
   }
 
   async refreshMicrophones() {
@@ -6531,7 +9387,8 @@ class WatchTogetherApp {
       this.microphoneDevices =
         devices.filter(
           (d) =>
-            d.kind === "audioinput" &&
+            d.kind ===
+              "audioinput" &&
             d.deviceId
         );
 
@@ -6571,36 +9428,37 @@ class WatchTogetherApp {
         </option>
       `,
 
-      ...this.microphoneDevices.map(
-        (
-          device,
-          index
-        ) => {
-          const label =
-            device.label ||
-            `Microphone ${index + 1}`;
+      ...this.microphoneDevices
+        .map(
+          (
+            device,
+            index
+          ) => {
+            const label =
+              device.label ||
+              `Microphone ${index + 1}`;
 
-          const hint =
-            this.looksLikeBluetoothMic(
-              label
-            )
-              ? " · Bluetooth"
-              : "";
+            const hint =
+              this.looksLikeBluetoothMic(
+                label
+              )
+                ? " · Bluetooth"
+                : "";
 
-          return `
-            <option
-              value="${esc(
-                device.deviceId
-              )}"
-            >
-              ${esc(
-                label +
-                hint
-              )}
-            </option>
-          `;
-        }
-      ),
+            return `
+              <option
+                value="${esc(
+                  device.deviceId
+                )}"
+              >
+                ${esc(
+                  label +
+                  hint
+                )}
+              </option>
+            `;
+          }
+        ),
     ];
 
     select.innerHTML =
@@ -6608,18 +9466,21 @@ class WatchTogetherApp {
 
     if (
       current &&
-      this.microphoneDevices.some(
-        (d) =>
-          d.deviceId ===
-          current
-      )
+      this.microphoneDevices
+        .some(
+          (d) =>
+            d.deviceId ===
+            current
+        )
     ) {
       select.value =
         current;
     }
   }
 
-  async publishLocalTrack(track) {
+  async publishLocalTrack(
+    track
+  ) {
     const stream =
       this.ensureLocalStream();
 
@@ -6653,12 +9514,16 @@ class WatchTogetherApp {
           .getSenders()
           .find(
             (s) =>
-              s.track === oldTrack ||
-              s.track?.kind ===
+              s.track ===
+                oldTrack ||
+              s.track
+                ?.kind ===
                 track.kind
           );
 
-      if (sender) {
+      if (
+        sender
+      ) {
         try {
           await sender.replaceTrack(
             track
@@ -6678,9 +9543,11 @@ class WatchTogetherApp {
         );
 
         if (
-          this.peerId.localeCompare(
-            peerId
-          ) < 0
+          this.peerId
+            .localeCompare(
+              peerId
+            ) <
+          0
         ) {
           this.makeOffer(
             peerId
@@ -6701,7 +9568,9 @@ class WatchTogetherApp {
       }
     }
 
-    if (oldTrack) {
+    if (
+      oldTrack
+    ) {
       try {
         stream.removeTrack(
           oldTrack
@@ -6726,7 +9595,9 @@ class WatchTogetherApp {
         ?.getVideoTracks()
         ?.[0];
 
-    if (existing) {
+    if (
+      existing
+    ) {
       existing.enabled =
         true;
 
@@ -6736,6 +9607,7 @@ class WatchTogetherApp {
       await this.trackPresence();
 
       this.updateMediaButtons();
+
       this.updatePeopleUI();
 
       return;
@@ -6773,7 +9645,9 @@ class WatchTogetherApp {
         stream
           .getVideoTracks()[0];
 
-      if (!track) {
+      if (
+        !track
+      ) {
         throw new Error(
           "No camera track returned"
         );
@@ -6789,6 +9663,7 @@ class WatchTogetherApp {
       await this.trackPresence();
 
       this.updateMediaButtons();
+
       this.updatePeopleUI();
 
       this.toast(
@@ -6810,10 +9685,8 @@ class WatchTogetherApp {
   }
 
   async enableMicrophone(
-    requestedDeviceId =
-      "",
-    switching =
-      false
+    requestedDeviceId = "",
+    switching = false
   ) {
     try {
       let stream =
@@ -6832,7 +9705,9 @@ class WatchTogetherApp {
         stream
           .getAudioTracks()[0];
 
-      if (!track) {
+      if (
+        !track
+      ) {
         throw new Error(
           "No microphone track returned"
         );
@@ -6843,7 +9718,8 @@ class WatchTogetherApp {
 
       const initialDeviceId =
         track
-          .getSettings?.()
+          .getSettings
+          ?.()
           .deviceId ||
         requestedDeviceId ||
         "";
@@ -6855,15 +9731,11 @@ class WatchTogetherApp {
             initialDeviceId
         );
 
-      /*
-       * Avoid Bluetooth hands-free mode
-       * when a built-in microphone is available.
-       */
-
       if (
         !requestedDeviceId &&
         this.looksLikeBluetoothMic(
-          initialDevice?.label ||
+          initialDevice
+            ?.label ||
           ""
         )
       ) {
@@ -6913,8 +9785,8 @@ class WatchTogetherApp {
       }
 
       if (
-        "contentHint"
-        in track
+        "contentHint" in
+        track
       ) {
         try {
           track.contentHint =
@@ -6925,7 +9797,8 @@ class WatchTogetherApp {
 
       this.micDeviceId =
         track
-          .getSettings?.()
+          .getSettings
+          ?.()
           .deviceId ||
         requestedDeviceId ||
         initialDeviceId ||
@@ -6943,18 +9816,21 @@ class WatchTogetherApp {
       await this.trackPresence();
 
       this.updateMediaButtons();
+
       this.updatePeopleUI();
 
       const selected =
-        this.microphoneDevices.find(
-          (d) =>
-            d.deviceId ===
-            this.micDeviceId
-        );
+        this.microphoneDevices
+          .find(
+            (d) =>
+              d.deviceId ===
+              this.micDeviceId
+          );
 
       if (
         this.looksLikeBluetoothMic(
-          selected?.label ||
+          selected
+            ?.label ||
           ""
         )
       ) {
@@ -6963,7 +9839,9 @@ class WatchTogetherApp {
           "bad"
         );
 
-      } else if (switching) {
+      } else if (
+        switching
+      ) {
         this.toast(
           `Microphone changed to ${
             selected?.label ||
@@ -6998,7 +9876,9 @@ class WatchTogetherApp {
         ?.getAudioTracks()
         ?.[0];
 
-    if (!track) {
+    if (
+      !track
+    ) {
       this.enableMicrophone();
 
       return;
@@ -7013,6 +9893,7 @@ class WatchTogetherApp {
     this.trackPresence();
 
     this.updateMediaButtons();
+
     this.updatePeopleUI();
   }
 
@@ -7022,7 +9903,9 @@ class WatchTogetherApp {
         ?.getVideoTracks()
         ?.[0];
 
-    if (!track) {
+    if (
+      !track
+    ) {
       this.enableCamera();
 
       return;
@@ -7037,6 +9920,7 @@ class WatchTogetherApp {
     this.trackPresence();
 
     this.updateMediaButtons();
+
     this.updatePeopleUI();
   }
 
@@ -7071,7 +9955,9 @@ class WatchTogetherApp {
         ?.getVideoTracks()
         ?.[0];
 
-    if (enableCamera) {
+    if (
+      enableCamera
+    ) {
       enableCamera.textContent =
         videoTrack
           ? "✓ Camera enabled"
@@ -7083,7 +9969,9 @@ class WatchTogetherApp {
         );
     }
 
-    if (enableMic) {
+    if (
+      enableMic
+    ) {
       enableMic.textContent =
         audioTrack
           ? "✓ Microphone enabled"
@@ -7095,7 +9983,9 @@ class WatchTogetherApp {
         );
     }
 
-    if (mic) {
+    if (
+      mic
+    ) {
       mic.disabled =
         !audioTrack;
 
@@ -7105,7 +9995,9 @@ class WatchTogetherApp {
           : "🔇 Unmute";
     }
 
-    if (cam) {
+    if (
+      cam
+    ) {
       cam.disabled =
         !videoTrack;
 
@@ -7127,22 +10019,28 @@ class WatchTogetherApp {
         "#people-count"
       );
 
-    if (!grid) {
+    if (
+      !grid
+    ) {
       return;
     }
 
-    if (count) {
+    if (
+      count
+    ) {
       count.textContent =
         `${this.participants.size}/10`;
     }
 
     const sorted =
-      [...this.participants.values()]
-        .sort(
-          (a, b) =>
-            a.joinedAt -
-            b.joinedAt
-        );
+      [
+        ...this.participants
+          .values(),
+      ].sort(
+        (a, b) =>
+          a.joinedAt -
+          b.joinedAt
+      );
 
     grid.innerHTML =
       sorted
@@ -7155,9 +10053,10 @@ class WatchTogetherApp {
             const stream =
               self
                 ? this.localStream
-                : this.remoteStreams.get(
-                    p.peerId
-                  );
+                : this.remoteStreams
+                    .get(
+                      p.peerId
+                    );
 
             const cameraOn =
               self
@@ -7172,7 +10071,9 @@ class WatchTogetherApp {
 
                     <button
                       class="kick-peer"
-                      data-peer="${esc(p.peerId)}"
+                      data-peer="${esc(
+                        p.peerId
+                      )}"
                       title="Remove participant"
                       style="border:0;background:transparent;color:#ff9aa5;font-size:10px;padding:0 3px"
                     >
@@ -7181,7 +10082,9 @@ class WatchTogetherApp {
 
                     <button
                       class="mute-peer"
-                      data-peer="${esc(p.peerId)}"
+                      data-peer="${esc(
+                        p.peerId
+                      )}"
                       title="Mute participant"
                       style="border:0;background:transparent;color:#dfe4f3;font-size:10px;padding:0 3px"
                     >
@@ -7195,7 +10098,9 @@ class WatchTogetherApp {
             return `
               <div
                 class="wt-person-card"
-                data-person="${esc(p.peerId)}"
+                data-person="${esc(
+                  p.peerId
+                )}"
               >
 
                 ${
@@ -7203,7 +10108,9 @@ class WatchTogetherApp {
                   cameraOn
                     ? `
                       <video
-                        id="peer-video-${esc(p.peerId)}"
+                        id="peer-video-${esc(
+                          p.peerId
+                        )}"
                         autoplay
                         playsinline
                         ${
@@ -7222,7 +10129,9 @@ class WatchTogetherApp {
                             👤
                           </div>
 
-                          ${esc(p.name)}
+                          ${esc(
+                            p.name
+                          )}
 
                           <br>
 
@@ -7245,13 +10154,11 @@ class WatchTogetherApp {
                         : ""
                     }
 
-                    ${
-                      esc(
-                        self
-                          ? "You"
-                          : p.name
-                      )
-                    }
+                    ${esc(
+                      self
+                        ? "You"
+                        : p.name
+                    )}
 
                     ${
                       p.mic
@@ -7287,9 +10194,10 @@ class WatchTogetherApp {
       const stream =
         self
           ? this.localStream
-          : this.remoteStreams.get(
-              p.peerId
-            );
+          : this.remoteStreams
+              .get(
+                p.peerId
+              );
 
       const video =
         this.root.querySelector(
@@ -7307,8 +10215,7 @@ class WatchTogetherApp {
         video.srcObject =
           stream;
 
-        video
-          .play()
+        video.play()
           .catch(
             () => {}
           );
@@ -7379,7 +10286,9 @@ class WatchTogetherApp {
       );
   }
 
-  onModerationMute(payload) {
+  onModerationMute(
+    payload
+  ) {
     if (
       payload?.to !==
         this.peerId ||
@@ -7394,7 +10303,9 @@ class WatchTogetherApp {
         ?.getAudioTracks()
         ?.[0];
 
-    if (track) {
+    if (
+      track
+    ) {
       track.enabled =
         false;
 
@@ -7404,6 +10315,7 @@ class WatchTogetherApp {
       this.trackPresence();
 
       this.updateMediaButtons();
+
       this.updatePeopleUI();
     }
 
@@ -7436,30 +10348,32 @@ class WatchTogetherApp {
         "#speed"
       );
 
-    if (play) {
+    if (
+      play
+    ) {
       play.disabled =
         !this.isHost;
     }
 
-    if (timeline) {
+    if (
+      timeline
+    ) {
       timeline.disabled =
         !this.isHost;
     }
 
-    if (speed) {
+    if (
+      speed
+    ) {
       speed.disabled =
         !this.isHost;
     }
   }
 
-  /*
-   * ============================================================
-   * ROOM CONTROLS
-   * ============================================================
-   */
-
   toggleLock() {
-    if (!this.isHost) {
+    if (
+      !this.isHost
+    ) {
       return;
     }
 
@@ -7493,7 +10407,9 @@ class WatchTogetherApp {
         "#lock-btn"
       );
 
-    if (btn) {
+    if (
+      btn
+    ) {
       btn.textContent =
         this.locked
           ? "🔒 Unlock room"
@@ -7508,7 +10424,9 @@ class WatchTogetherApp {
     );
   }
 
-  onRoomControl(payload) {
+  onRoomControl(
+    payload
+  ) {
     if (
       payload?.from !==
       this.hostId
@@ -7562,7 +10480,9 @@ class WatchTogetherApp {
   }
 
   endRoom() {
-    if (!this.isHost) {
+    if (
+      !this.isHost
+    ) {
       return;
     }
 
@@ -7641,19 +10561,25 @@ class WatchTogetherApp {
         ".wt-top-actions .wt-pill"
       );
 
-    if (!pills.length) {
+    if (
+      !pills.length
+    ) {
       return;
     }
 
     const status =
-      [...pills].find(
+      [
+        ...pills,
+      ].find(
         (el) =>
           el.querySelector(
             ".wt-dot"
           )
       );
 
-    if (!status) {
+    if (
+      !status
+    ) {
       return;
     }
 
@@ -7678,10 +10604,6 @@ class WatchTogetherApp {
   }
 
   scheduleReconnect() {
-    /*
-     * Never reconnect after deliberate Leave / End Room.
-     */
-
     if (
       this.intentionalDisconnect ||
       this.destroyed
@@ -7693,32 +10615,81 @@ class WatchTogetherApp {
       this.reconnectTimer
     );
 
-    const code =
-      this.roomCode;
-
-    const name =
-      this.name;
-
     this.reconnectTimer =
       setTimeout(
         () => {
           if (
-            !this.destroyed &&
-            !this.intentionalDisconnect &&
-            this.connectionStatus !==
-              "connected" &&
-            code &&
-            name
+            this.destroyed ||
+            this.intentionalDisconnect ||
+            this.connectionStatus ===
+              "connected"
           ) {
-            this.joinRoom(
-              code,
-              name,
-              false
+            return;
+          }
+
+          try {
+            this.supabase
+              ?.realtime
+              ?.connect();
+
+          } catch (error) {
+            console.warn(
+              "Realtime reconnect failed",
+              error
             );
           }
         },
-        1800
+        1200
       );
+  }
+
+  onRealtimeHeartbeat(
+    status
+  ) {
+    if (
+      this.destroyed ||
+      this.intentionalDisconnect ||
+      !this.roomCode
+    ) {
+      return;
+    }
+
+    if (
+      status ===
+      "ok"
+    ) {
+      return;
+    }
+
+    if (
+      [
+        "timeout",
+        "disconnected",
+        "error",
+      ].includes(
+        status
+      )
+    ) {
+      this.connected =
+        false;
+
+      this.connectionStatus =
+        "reconnecting";
+
+      this.updateTopStatus();
+
+      try {
+        this.supabase
+          ?.realtime
+          ?.connect();
+
+      } catch (error) {
+        console.warn(
+          "Heartbeat reconnect failed",
+          error
+        );
+      }
+    }
   }
 
   closePeer(peerId) {
@@ -7727,7 +10698,9 @@ class WatchTogetherApp {
         peerId
       );
 
-    if (pc) {
+    if (
+      pc
+    ) {
       try {
         pc.close();
 
@@ -7755,13 +10728,8 @@ class WatchTogetherApp {
   }
 
   async leaveRoom(
-    goHome =
-      true
+    goHome = true
   ) {
-    /*
-     * Must be set BEFORE removing Supabase channel.
-     */
-
     this.intentionalDisconnect =
       true;
 
@@ -7802,7 +10770,9 @@ class WatchTogetherApp {
     this.connected =
       false;
 
-    if (channel) {
+    if (
+      channel
+    ) {
       try {
         await channel.untrack();
 
@@ -7829,7 +10799,9 @@ class WatchTogetherApp {
 
     for (
       const peerId
-      of [...this.pcs.keys()]
+      of [
+        ...this.pcs.keys(),
+      ]
     ) {
       this.closePeer(
         peerId
@@ -7855,7 +10827,9 @@ class WatchTogetherApp {
     this.clockOffset =
       0;
 
-    if (goHome) {
+    if (
+      goHome
+    ) {
       this.cleanupMovieAudio();
 
       this.stopLocalMedia();
@@ -7884,10 +10858,13 @@ class WatchTogetherApp {
   }
 
   stopLocalMedia() {
-    if (this.localStream) {
+    if (
+      this.localStream
+    ) {
       for (
         const track
-        of this.localStream.getTracks()
+        of this.localStream
+          .getTracks()
       ) {
         track.stop();
       }
@@ -7907,7 +10884,8 @@ class WatchTogetherApp {
     try {
       const cleanRoom =
         safeRoomCode(
-          roomCode || ""
+          roomCode ||
+          ""
         );
 
       const url =
@@ -7915,7 +10893,9 @@ class WatchTogetherApp {
           window.location.href
         );
 
-      if (cleanRoom) {
+      if (
+        cleanRoom
+      ) {
         url.searchParams.set(
           "room",
           cleanRoom
@@ -7941,15 +10921,16 @@ class WatchTogetherApp {
 
   toast(
     text,
-    kind =
-      ""
+    kind = ""
   ) {
     let stack =
       this.root.querySelector(
         "#toast-stack"
       );
 
-    if (!stack) {
+    if (
+      !stack
+    ) {
       stack =
         document.createElement(
           "div"
@@ -8000,7 +10981,9 @@ class WatchTogetherApp {
 
     this.stopLocalMedia();
 
-    if (this.fileUrl) {
+    if (
+      this.fileUrl
+    ) {
       URL.revokeObjectURL(
         this.fileUrl
       );
@@ -8044,9 +11027,7 @@ export default function({
   return () => {
     app.destroy();
 
-    delete parentElement.__watchTogetherApp;
+    delete parentElement
+      .__watchTogetherApp;
   };
 }
- /*
-     * THis is Updated Code Version 2
-     */
