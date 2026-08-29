@@ -8777,9 +8777,6 @@ class WatchTogetherApp {
       new RTCPeerConnection({
         iceServers:
           this.iceServers(),
-
-        bundlePolicy:
-          "max-bundle",
       });
 
     this.pcs.set(
