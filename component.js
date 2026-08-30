@@ -10486,29 +10486,22 @@ class WatchTogetherApp {
           stream
         );
 
-        if (
-          this.peerId
-            .localeCompare(
-              peerId
-            ) <
-          0
-        ) {
-          this.makeOffer(
-            peerId
-          );
+        /*
+         * Always offer directly, regardless of peerId
+         * ordering: the peer adding a new track is the
+         * only one who knows what to describe. Asking
+         * the other side to createOffer() instead (via
+         * "renegotiate") produces an empty/useless SDP
+         * whenever they have no local tracks of their
+         * own - the new track would never actually get
+         * negotiated. Any simultaneous-offer collision
+         * is already handled by the rollback logic in
+         * onSignal().
+         */
 
-        } else {
-          this.send(
-            "renegotiate",
-            {
-              from:
-                this.peerId,
-
-              to:
-                peerId,
-            }
-          );
-        }
+        this.makeOffer(
+          peerId
+        );
       }
     }
 
