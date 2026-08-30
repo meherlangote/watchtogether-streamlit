@@ -2086,6 +2086,49 @@ class WatchTogetherApp {
       false
     );
 
+    this.cleanupMovieAudio();
+
+    if (
+      this.fileUrl
+    ) {
+      URL.revokeObjectURL(
+        this.fileUrl
+      );
+    }
+
+    this.file =
+      null;
+
+    this.fileUrl =
+      "";
+
+    this.fileHash =
+      "";
+
+    this.fileDuration =
+      0;
+
+    this.hashing =
+      false;
+
+    this.hashProgress =
+      0;
+
+    this.verified =
+      false;
+
+    this.verifyMessage =
+      "";
+
+    this.sourceType =
+      "";
+
+    this.youtubeVideoId =
+      "";
+
+    this.youtubeVideoTitle =
+      "";
+
     this.intentionalDisconnect =
       false;
 
