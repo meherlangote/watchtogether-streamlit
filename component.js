@@ -4133,6 +4133,8 @@ class WatchTogetherApp {
 
       this.verifyHostStreamSource();
 
+      await this.trackPresence();
+
       this.renderMovieSelect();
 
     } catch (error) {
