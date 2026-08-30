@@ -10119,6 +10119,14 @@ class WatchTogetherApp {
         captured
           .getVideoTracks()[0];
 
+      if (
+        videoTrack
+      ) {
+        videoTrack.onended =
+          () =>
+            this.recaptureHostStreamVideo();
+      }
+
       await this.ensureMovieAudioContext();
 
       this.hostStreamAudioDest =
@@ -10169,6 +10177,105 @@ class WatchTogetherApp {
       this.toast(
         "Couldn't start streaming your video. You can still watch it locally.",
         "bad"
+      );
+    }
+  }
+
+  async recaptureHostStreamVideo() {
+    if (
+      !this.isHost ||
+      !this.video ||
+      this.sourceType !==
+        "host-stream" ||
+      typeof this.video
+        .captureStream !==
+        "function"
+    ) {
+      return;
+    }
+
+    try {
+      const captured =
+        this.video.captureStream();
+
+      const newTrack =
+        captured
+          .getVideoTracks()[0];
+
+      if (
+        !newTrack
+      ) {
+        return;
+      }
+
+      newTrack.onended =
+        () =>
+          this.recaptureHostStreamVideo();
+
+      const oldTrack =
+        this.hostMovieStream
+          ?.getVideoTracks()[0];
+
+      if (
+        this.hostMovieStream
+      ) {
+        if (
+          oldTrack
+        ) {
+          this.hostMovieStream.removeTrack(
+            oldTrack
+          );
+        }
+
+        this.hostMovieStream.addTrack(
+          newTrack
+        );
+      }
+
+      for (
+        const pc
+        of this.moviePcs.values()
+      ) {
+        const sender =
+          pc
+            .getSenders()
+            .find(
+              (s) =>
+                s.track
+                  ?.kind ===
+                "video"
+            );
+
+        if (
+          sender
+        ) {
+          try {
+            await sender.replaceTrack(
+              newTrack
+            );
+
+          } catch (error) {
+            console.warn(
+              "Could not replace movie video track",
+              error
+            );
+          }
+        }
+      }
+
+      if (
+        oldTrack
+      ) {
+        try {
+          oldTrack.stop();
+
+        } catch {}
+      }
+
+    } catch (error) {
+      console.warn(
+        "Could not recapture host stream video",
+        error
       );
     }
   }
