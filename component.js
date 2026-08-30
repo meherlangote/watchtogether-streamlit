@@ -4462,6 +4462,14 @@ class WatchTogetherApp {
                         aria-label="Volume"
                       >
 
+                      <button
+                        class="wt-icon-btn"
+                        id="full-btn"
+                        aria-label="Fullscreen"
+                      >
+                        ⛶
+                      </button>
+
                     </div>
 
                   </div>
@@ -5203,21 +5211,6 @@ class WatchTogetherApp {
 
     this.root
       .querySelector(
-        "#full-btn"
-      )
-      ?.addEventListener(
-        "click",
-        () =>
-          this.root
-            .querySelector(
-              ".wt-video-wrap"
-            )
-            ?.requestFullscreen
-            ?.()
-      );
-
-    this.root
-      .querySelector(
         "#pip-btn"
       )
       ?.addEventListener(
@@ -5249,6 +5242,21 @@ class WatchTogetherApp {
       );
 
     }
+
+    this.root
+      .querySelector(
+        "#full-btn"
+      )
+      ?.addEventListener(
+        "click",
+        () =>
+          this.root
+            .querySelector(
+              ".wt-video-wrap"
+            )
+            ?.requestFullscreen
+            ?.()
+      );
 
     this.root
       .querySelector(
