@@ -10126,9 +10126,25 @@ class WatchTogetherApp {
           );
       }
 
+      this.root
+        .querySelector(
+          "#video-empty"
+        )
+        ?.classList.add(
+          "wt-hidden"
+        );
+
     } else {
       video.srcObject =
         null;
+
+      this.root
+        .querySelector(
+          "#video-empty"
+        )
+        ?.classList.remove(
+          "wt-hidden"
+        );
     }
   }
 
