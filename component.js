@@ -1311,6 +1311,9 @@ class WatchTogetherApp {
 
     this.moviePendingOffers =
       new Set();
+
+    this.hostStreamAttachedTrackCount =
+      0;
   }
 
   async init() {
@@ -10186,25 +10189,42 @@ class WatchTogetherApp {
       this.remoteMovieStream
     ) {
       /*
-       * Always force a fresh assignment, even if the
-       * stream reference is unchanged: video and audio
-       * tracks arrive as separate ontrack events on the
-       * same MediaStream, and some browsers don't
-       * reliably pick up a track added to a stream the
-       * element is already playing unless srcObject is
-       * re-bound from scratch.
+       * Video and audio tracks arrive as separate
+       * ontrack events on the same MediaStream, so a
+       * plain reference-equality check misses a video
+       * track that arrives after audio already attached.
+       * Rebind only when the stream reference or its
+       * track count actually changed - re-assigning
+       * srcObject on every call (even to the same value)
+       * was found to leave the element stuck at
+       * readyState 0 with no decoded frames.
        */
 
-      video.srcObject =
-        null;
+      const trackCount =
+        this.remoteMovieStream
+          .getTracks()
+          .length;
 
-      video.srcObject =
-        this.remoteMovieStream;
+      const needsRebind =
+        video.srcObject !==
+          this.remoteMovieStream ||
+        this.hostStreamAttachedTrackCount !==
+          trackCount;
 
-      video.play()
-        .catch(
-          () => {}
-        );
+      if (
+        needsRebind
+      ) {
+        video.srcObject =
+          this.remoteMovieStream;
+
+        this.hostStreamAttachedTrackCount =
+          trackCount;
+
+        video.play()
+          .catch(
+            () => {}
+          );
+      }
 
       this.root
         .querySelector(
@@ -10217,6 +10237,9 @@ class WatchTogetherApp {
     } else {
       video.srcObject =
         null;
+
+      this.hostStreamAttachedTrackCount =
+        0;
 
       this.root
         .querySelector(
