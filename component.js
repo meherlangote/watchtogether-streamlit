@@ -8654,6 +8654,35 @@ class WatchTogetherApp {
     } else if (
       state.playing &&
       abs >=
+        0.10 &&
+      this.sourceType ===
+        "youtube"
+    ) {
+      /*
+       * YouTube's setPlaybackRate() only accepts
+       * discrete steps (0.75/1/1.25/1.5/2), so a
+       * continuous ±4% nudge just snaps back to
+       * baseRate and never actually corrects.
+       * Nudge to the next real step instead.
+       */
+
+      this.video.playbackRate =
+        drift >
+        0
+          ? Math.min(
+              2,
+              baseRate +
+              0.25
+            )
+          : Math.max(
+              0.25,
+              baseRate -
+              0.25
+            );
+
+    } else if (
+      state.playing &&
+      abs >=
         0.10
     ) {
       const correction =
@@ -10113,18 +10142,26 @@ class WatchTogetherApp {
     if (
       this.remoteMovieStream
     ) {
-      if (
-        video.srcObject !==
-        this.remoteMovieStream
-      ) {
-        video.srcObject =
-          this.remoteMovieStream;
+      /*
+       * Always force a fresh assignment, even if the
+       * stream reference is unchanged: video and audio
+       * tracks arrive as separate ontrack events on the
+       * same MediaStream, and some browsers don't
+       * reliably pick up a track added to a stream the
+       * element is already playing unless srcObject is
+       * re-bound from scratch.
+       */
 
-        video.play()
-          .catch(
-            () => {}
-          );
-      }
+      video.srcObject =
+        null;
+
+      video.srcObject =
+        this.remoteMovieStream;
+
+      video.play()
+        .catch(
+          () => {}
+        );
 
       this.root
         .querySelector(
