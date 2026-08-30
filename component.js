@@ -1609,7 +1609,7 @@ class WatchTogetherApp {
           <div>
 
             <span class="wt-eyebrow">
-              🔒 Local movie playback · realtime with friends
+              🎬 Local movies, YouTube & live streaming · realtime with friends
             </span>
 
             <h1>
@@ -1622,9 +1622,9 @@ class WatchTogetherApp {
             </h1>
 
             <p class="wt-hero-copy">
-              Play the movie locally on your computer.
-              Stay synchronized with your friends.
-              Your movie never leaves your device.
+              Watch a movie everyone already has, a YouTube video,
+              or stream your own movie live to friends who don't.
+              Stay perfectly synchronized, however you watch.
             </p>
 
             <div class="wt-actions">
@@ -1648,9 +1648,9 @@ class WatchTogetherApp {
             <div class="wt-privacy">
               🛡️
               <span>
-                No movie upload.
-                We only synchronize playback,
-                chat, camera and microphone.
+                No movie is ever uploaded to a server —
+                only playback, chat, camera and microphone
+                are synchronized through us.
               </span>
             </div>
 
@@ -1693,11 +1693,11 @@ class WatchTogetherApp {
             </div>
 
             <strong>
-              Local Playback
+              Watch Your Way
             </strong>
 
             <span>
-              Your movie stays on your device.
+              A shared local file, a YouTube video, or a live stream from the host.
             </span>
           </div>
 
@@ -1749,11 +1749,11 @@ class WatchTogetherApp {
             </div>
 
             <strong>
-              Private Movie
+              No Server Uploads
             </strong>
 
             <span>
-              Movie bytes never go to Streamlit or Supabase.
+              Movie bytes never go to Streamlit or Supabase — even when streaming live.
             </span>
           </div>
 
@@ -3001,8 +3001,8 @@ class WatchTogetherApp {
             <p>
               ${
                 this.isHost
-                  ? "Share this invite, then choose a local movie or a YouTube video to watch."
-                  : "Continue to join the host's movie or YouTube video."
+                  ? "Share this invite, then choose a local movie, a YouTube video, or stream your own movie live."
+                  : "Continue to join the host's movie, YouTube video, or live stream."
               }
             </p>
 
@@ -3455,7 +3455,7 @@ class WatchTogetherApp {
             host.movieName ||
             "movie"
           )}`
-        : "Waiting for the host to select a movie";
+        : "Waiting for the host to choose what to watch";
 
     const status =
       this.hashing
