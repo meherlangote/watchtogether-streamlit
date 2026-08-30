@@ -10378,9 +10378,20 @@ class WatchTogetherApp {
           true,
       },
 
+      /*
+       * Chrome's noise suppression is trained to isolate
+       * speech and attenuate everything else as "noise" -
+       * it frequently misclassifies a movie's own
+       * background music/score as noise and suppresses it
+       * while leaving dialogue intact (a well-known issue
+       * across video-call apps). Requesting it here would
+       * degrade movie audio the moment the mic turns on,
+       * for every listener, not just the mic owner.
+       */
+
       noiseSuppression: {
         ideal:
-          true,
+          false,
       },
 
       autoGainControl: {
