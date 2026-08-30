@@ -1293,6 +1293,24 @@ class WatchTogetherApp {
 
     this.youtubeVideoTitle =
       "";
+
+    this.hostMovieStream =
+      null;
+
+    this.hostStreamAudioDest =
+      null;
+
+    this.remoteMovieStream =
+      null;
+
+    this.moviePcs =
+      new Map();
+
+    this.movieIceQueues =
+      new Map();
+
+    this.moviePendingOffers =
+      new Set();
   }
 
   async init() {
@@ -2201,6 +2219,14 @@ class WatchTogetherApp {
     );
 
     onBroadcast(
+      "movie-signal",
+      (p) =>
+        this.onMovieSignal(
+          p
+        )
+    );
+
+    onBroadcast(
       "kick",
       (p) =>
         this.onKick(p)
@@ -2736,6 +2762,21 @@ class WatchTogetherApp {
       this.ensurePeerHandshake(
         id
       );
+
+      if (
+        this.isHost &&
+        this.sourceType ===
+          "host-stream" &&
+        this.hostMovieStream
+      ) {
+        this.ensureMoviePC(
+          id
+        );
+
+        this.makeMovieOffer(
+          id
+        );
+      }
     }
 
     for (
@@ -2748,6 +2789,10 @@ class WatchTogetherApp {
         )
       ) {
         this.closePeer(
+          id
+        );
+
+        this.closeMoviePeer(
           id
         );
       }
@@ -2797,6 +2842,22 @@ class WatchTogetherApp {
           );
         }
 
+        if (
+          oldHost &&
+          this.sourceType ===
+            "host-stream"
+        ) {
+          this.toast(
+            "The host left, so streaming has ended.",
+            "bad"
+          );
+
+          this.remoteMovieStream =
+            null;
+
+          this.updateHostStreamVideo();
+        }
+
         this.syncClock();
 
         this.send(
@@ -2812,6 +2873,8 @@ class WatchTogetherApp {
     this.verifyAgainstHost();
 
     this.verifyYoutubeSource();
+
+    this.verifyHostStreamSource();
 
     if (
       this.phase ===
@@ -3227,6 +3290,88 @@ class WatchTogetherApp {
     }
   }
 
+  verifyHostStreamSource() {
+    const host =
+      this.participants.get(
+        this.hostId
+      );
+
+    if (this.isHost) {
+      if (
+        this.sourceType !==
+        "host-stream"
+      ) {
+        return;
+      }
+
+      this.verified =
+        Boolean(
+          this.file
+        );
+
+      this.verifyMessage =
+        this.file
+          ? "Ready to stream. Friends don't need this file."
+          : "Choose the movie you want to stream.";
+
+    } else {
+      if (
+        (host?.sourceType ||
+          "") !==
+        "host-stream"
+      ) {
+        return;
+      }
+
+      this.sourceType =
+        "host-stream";
+
+      this.verified =
+        true;
+
+      this.verifyMessage =
+        "The host will stream their video live ✓";
+    }
+
+    if (
+      this.phase ===
+      "movie"
+    ) {
+      const status =
+        this.root.querySelector(
+          ".wt-status-box"
+        );
+
+      if (status) {
+        status.className =
+          `wt-status-box ${
+            this.verified
+              ? "good"
+              : "bad"
+          }`;
+
+        status.textContent =
+          `${
+            this.verified
+              ? "✓"
+              : "⚠"
+          } ${
+            this.verifyMessage
+          }`;
+      }
+
+      const enter =
+        this.root.querySelector(
+          "#enter-watch"
+        );
+
+      if (enter) {
+        enter.disabled =
+          !this.verified;
+      }
+    }
+  }
+
   renderMovieSelect() {
     const host =
       this.participants.get(
@@ -3247,6 +3392,8 @@ class WatchTogetherApp {
 
     this.verifyYoutubeSource();
 
+    this.verifyHostStreamSource();
+
     const activeTab =
       this.sourceType ||
       "file";
@@ -3254,6 +3401,10 @@ class WatchTogetherApp {
     const isYoutube =
       activeTab ===
       "youtube";
+
+    const isHostStream =
+      activeTab ===
+      "host-stream";
 
     const hostText =
       host?.movieHash
@@ -3432,6 +3583,81 @@ class WatchTogetherApp {
       ${youtubeStatus}
     `;
 
+    const hostStreamStatus = `
+      <div
+        class="wt-status-box ${
+          this.verified
+            ? "good"
+            : "bad"
+        }"
+      >
+        ${
+          this.verified
+            ? "✓"
+            : "⚠"
+        }
+
+        ${esc(
+          this.verifyMessage
+        )}
+      </div>
+    `;
+
+    const hostStreamPanel =
+      this.isHost
+        ? `
+          <label
+            class="wt-file-drop"
+            for="host-stream-file"
+          >
+
+            <div>
+
+              <div class="wt-file-icon">
+                🎥
+              </div>
+
+              <h3>
+                ${
+                  this.file &&
+                  this.sourceType ===
+                    "host-stream"
+                    ? esc(
+                        this.file.name
+                      )
+                    : "Select the movie you'll stream"
+                }
+              </h3>
+
+              <p class="wt-muted">
+                Friends don't need this file — they'll watch it live from your browser, camera-call style.
+              </p>
+
+              <span class="wt-btn secondary small">
+                Choose Movie
+              </span>
+
+            </div>
+
+          </label>
+
+          <input
+            class="wt-hidden"
+            id="host-stream-file"
+            type="file"
+            accept="video/*,.mkv,.mp4,.webm,.mov,.m4v"
+          >
+
+          ${hostStreamStatus}
+        `
+        : `
+          <div class="wt-status-box">
+            You'll watch the host's video streamed live — no file needed on your end.
+          </div>
+
+          ${hostStreamStatus}
+        `;
+
     const tabs =
       this.isHost
         ? `
@@ -3440,7 +3666,8 @@ class WatchTogetherApp {
             <button
               type="button"
               class="wt-btn ${
-                !isYoutube
+                !isYoutube &&
+                !isHostStream
                   ? "primary"
                   : "secondary"
               } small"
@@ -3459,6 +3686,18 @@ class WatchTogetherApp {
               id="tab-youtube"
             >
               ▶ YouTube
+            </button>
+
+            <button
+              type="button"
+              class="wt-btn ${
+                isHostStream
+                  ? "primary"
+                  : "secondary"
+              } small"
+              id="tab-host-stream"
+            >
+              🎥 Stream My Video
             </button>
 
           </div>
@@ -3482,7 +3721,9 @@ class WatchTogetherApp {
               ${
                 isYoutube
                   ? "Everyone in the room streams the same public YouTube video directly from YouTube."
-                  : "Your browser reads this file locally. The movie is never uploaded to Streamlit or Supabase."
+                  : isHostStream
+                    ? "The host's movie is streamed live, peer-to-peer, straight to friends' browsers — never through Streamlit or Supabase, but it does leave the host's device this time."
+                    : "Your browser reads this file locally. The movie is never uploaded to Streamlit or Supabase."
               }
             </p>
 
@@ -3491,7 +3732,9 @@ class WatchTogetherApp {
             ${
               isYoutube
                 ? youtubePanel
-                : filePanel
+                : isHostStream
+                  ? hostStreamPanel
+                  : filePanel
             }
 
             <div class="wt-modal-actions">
@@ -3583,6 +3826,35 @@ class WatchTogetherApp {
 
           this.render();
         }
+      );
+
+    this.root
+      .querySelector(
+        "#tab-host-stream"
+      )
+      ?.addEventListener(
+        "click",
+        () => {
+          this.sourceType =
+            "host-stream";
+
+          this.verifyHostStreamSource();
+
+          this.render();
+        }
+      );
+
+    this.root
+      .querySelector(
+        "#host-stream-file"
+      )
+      ?.addEventListener(
+        "change",
+        (e) =>
+          this.selectHostStreamMovie(
+            e.target.files
+              ?.[0]
+          )
       );
 
     this.root
@@ -3813,6 +4085,72 @@ class WatchTogetherApp {
     }
   }
 
+  async selectHostStreamMovie(
+    file
+  ) {
+    if (!file) {
+      return;
+    }
+
+    this.file =
+      file;
+
+    this.sourceType =
+      "host-stream";
+
+    if (
+      this.fileUrl
+    ) {
+      URL.revokeObjectURL(
+        this.fileUrl
+      );
+    }
+
+    this.fileUrl =
+      URL.createObjectURL(
+        file
+      );
+
+    this.fileHash =
+      "";
+
+    this.fileDuration =
+      0;
+
+    this.verified =
+      false;
+
+    this.verifyMessage =
+      "Reading file…";
+
+    this.renderMovieSelect();
+
+    try {
+      this.fileDuration =
+        await this.readDuration(
+          this.fileUrl
+        );
+
+      this.verifyHostStreamSource();
+
+      this.renderMovieSelect();
+
+    } catch (error) {
+      console.error(
+        "Reading movie for streaming failed",
+        error
+      );
+
+      this.verified =
+        false;
+
+      this.verifyMessage =
+        "We couldn't read this file. Try selecting it again.";
+
+      this.renderMovieSelect();
+    }
+  }
+
   readDuration(url) {
     return new Promise(
       (resolve) => {
@@ -3969,6 +4307,11 @@ class WatchTogetherApp {
       this.sourceType ===
       "youtube";
 
+    const isHostStreamGuest =
+      this.sourceType ===
+        "host-stream" &&
+      !this.isHost;
+
     this.root.innerHTML = `
       <div class="wt-shell wt-watch">
 
@@ -3988,14 +4331,23 @@ class WatchTogetherApp {
                       id="youtube-player"
                     ></div>
                   `
-                  : `
-                    <video
-                      class="wt-video"
-                      id="movie-video"
-                      playsinline
-                      preload="metadata"
-                    ></video>
-                  `
+                  : isHostStreamGuest
+                    ? `
+                      <video
+                        class="wt-video"
+                        id="host-stream-video"
+                        playsinline
+                        autoplay
+                      ></video>
+                    `
+                    : `
+                      <video
+                        class="wt-video"
+                        id="movie-video"
+                        playsinline
+                        preload="metadata"
+                      ></video>
+                    `
               }
 
               <div
@@ -4010,7 +4362,9 @@ class WatchTogetherApp {
                   ${
                     isYoutube
                       ? "Loading YouTube video…"
-                      : "Loading your local movie…"
+                      : isHostStreamGuest
+                        ? "Waiting for the host's stream…"
+                        : "Loading your local movie…"
                   }
                 </div>
               </div>
@@ -4020,13 +4374,51 @@ class WatchTogetherApp {
                   ${
                     isYoutube
                       ? "▶ Streaming from YouTube · playback is synchronized"
-                      : "🔒 Playing locally · only playback is synchronized"
+                      : this.sourceType ===
+                        "host-stream"
+                        ? isHostStreamGuest
+                          ? "📡 Watching live from the host"
+                          : "📡 Streaming to friends live"
+                        : "🔒 Playing locally · only playback is synchronized"
                   }
                 </span>
               </div>
 
             </div>
 
+            ${
+              isHostStreamGuest
+                ? `
+                  <div class="wt-controls">
+
+                    <span class="wt-live-badge">
+                      🔴 Live
+                    </span>
+
+                    <div></div>
+
+                    <div class="wt-control-right">
+
+                      <span aria-hidden="true">
+                        🔊
+                      </span>
+
+                      <input
+                        class="wt-volume"
+                        id="host-stream-volume"
+                        type="range"
+                        min="0"
+                        max="1"
+                        step="0.05"
+                        value="1"
+                        aria-label="Volume"
+                      >
+
+                    </div>
+
+                  </div>
+                `
+                : `
             <div class="wt-controls">
 
               <button
@@ -4192,6 +4584,8 @@ class WatchTogetherApp {
               </div>
 
             </div>
+                `
+            }
 
           </main>
 
@@ -4363,6 +4757,38 @@ class WatchTogetherApp {
     `;
 
     if (
+      isHostStreamGuest
+    ) {
+      this.video =
+        null;
+
+      this.updateHostStreamVideo();
+
+      this.root
+        .querySelector(
+          "#host-stream-volume"
+        )
+        ?.addEventListener(
+          "input",
+          (e) => {
+            const v =
+              this.root.querySelector(
+                "#host-stream-video"
+              );
+
+            if (v) {
+              v.volume =
+                Number(
+                  e.target
+                    .value
+                ) || 0;
+            }
+          }
+        );
+
+    } else {
+
+    if (
       isYoutube
     ) {
       this.video =
@@ -4479,6 +4905,15 @@ class WatchTogetherApp {
                 this.peerId,
             }
           );
+        }
+
+        if (
+          this.isHost &&
+          this.sourceType ===
+            "host-stream" &&
+          !this.hostMovieStream
+        ) {
+          this.startHostStreamCapture();
         }
       }
     );
@@ -4764,6 +5199,8 @@ class WatchTogetherApp {
           }
         }
       );
+
+    }
 
     this.root
       .querySelector(
@@ -5757,6 +6194,23 @@ class WatchTogetherApp {
     }
   }
 
+  connectToDestination(node) {
+    node.connect(
+      this.audioContext.destination
+    );
+
+    if (
+      this.hostStreamAudioDest
+    ) {
+      try {
+        node.connect(
+          this.hostStreamAudioDest
+        );
+
+      } catch {}
+    }
+  }
+
     buildCustomAudioOutputGraph() {
     if (
       !this.audioContext ||
@@ -5842,8 +6296,8 @@ class WatchTogetherApp {
         master
       );
 
-      master.connect(
-        ctx.destination
+      this.connectToDestination(
+        master
       );
 
       return;
@@ -5989,8 +6443,8 @@ class WatchTogetherApp {
       master
     );
 
-    master.connect(
-      ctx.destination
+    this.connectToDestination(
+      master
     );
   }
 
@@ -7150,8 +7604,8 @@ class WatchTogetherApp {
           master
         );
 
-      master.connect(
-        ctx.destination
+      this.connectToDestination(
+        master
       );
 
       return;
@@ -7297,8 +7751,8 @@ class WatchTogetherApp {
       master
     );
 
-    master.connect(
-      ctx.destination
+    this.connectToDestination(
+      master
     );
   }
 
@@ -7867,6 +8321,13 @@ class WatchTogetherApp {
             this.phase !==
               "watch" ||
             !this.video
+          ) {
+            return;
+          }
+
+          if (
+            this.sourceType ===
+            "host-stream"
           ) {
             return;
           }
@@ -9171,6 +9632,501 @@ class WatchTogetherApp {
             peerId,
         }
       );
+    }
+  }
+
+  ensureMoviePC(peerId) {
+    if (
+      this.moviePcs.has(
+        peerId
+      )
+    ) {
+      return this.moviePcs.get(
+        peerId
+      );
+    }
+
+    const pc =
+      new RTCPeerConnection({
+        iceServers:
+          this.iceServers(),
+      });
+
+    this.moviePcs.set(
+      peerId,
+      pc
+    );
+
+    this.movieIceQueues.set(
+      peerId,
+      []
+    );
+
+    if (
+      this.isHost &&
+      this.hostMovieStream
+    ) {
+      for (
+        const track
+        of this.hostMovieStream
+          .getTracks()
+      ) {
+        pc.addTrack(
+          track,
+          this.hostMovieStream
+        );
+      }
+    }
+
+    pc.onicecandidate =
+      (event) => {
+        if (
+          event.candidate
+        ) {
+          this.send(
+            "movie-signal",
+            {
+              from:
+                this.peerId,
+
+              to:
+                peerId,
+
+              kind:
+                "candidate",
+
+              candidate:
+                event.candidate
+                  .toJSON
+                  ?.() ||
+                event.candidate,
+            }
+          );
+        }
+      };
+
+    pc.ontrack =
+      (event) => {
+        this.remoteMovieStream =
+          event.streams
+            ?.[0] ||
+          new MediaStream(
+            [
+              event.track,
+            ]
+          );
+
+        if (
+          this.phase ===
+          "watch"
+        ) {
+          this.updateHostStreamVideo();
+        }
+      };
+
+    pc.onconnectionstatechange =
+      () => {
+        if (
+          [
+            "failed",
+            "disconnected",
+          ].includes(
+            pc.connectionState
+          ) &&
+          this.isHost
+        ) {
+          setTimeout(
+            () =>
+              this.makeMovieOffer(
+                peerId,
+                true
+              ),
+            1000
+          );
+        }
+
+        if (
+          pc.connectionState ===
+          "closed" &&
+          !this.isHost
+        ) {
+          this.remoteMovieStream =
+            null;
+
+          this.updateHostStreamVideo();
+        }
+      };
+
+    pc.onsignalingstatechange =
+      () => {
+        if (
+          pc.signalingState ===
+            "stable" &&
+          this.moviePendingOffers.has(
+            peerId
+          )
+        ) {
+          this.moviePendingOffers.delete(
+            peerId
+          );
+
+          this.makeMovieOffer(
+            peerId
+          );
+        }
+      };
+
+    return pc;
+  }
+
+  async makeMovieOffer(
+    peerId,
+    iceRestart = false
+  ) {
+    const pc =
+      this.ensureMoviePC(
+        peerId
+      );
+
+    if (
+      !pc ||
+      pc.signalingState !==
+        "stable"
+    ) {
+      if (pc) {
+        this.moviePendingOffers.add(
+          peerId
+        );
+      }
+
+      return;
+    }
+
+    try {
+      const offer =
+        await pc.createOffer({
+          iceRestart,
+        });
+
+      await pc.setLocalDescription(
+        offer
+      );
+
+      this.send(
+        "movie-signal",
+        {
+          from:
+            this.peerId,
+
+          to:
+            peerId,
+
+          kind:
+            "offer",
+
+          sdp:
+            pc.localDescription,
+        }
+      );
+
+    } catch (error) {
+      console.warn(
+        "Movie stream offer failed",
+        error
+      );
+    }
+  }
+
+  async onMovieSignal(payload) {
+    if (
+      !payload ||
+      payload.to !==
+        this.peerId ||
+      !payload.from
+    ) {
+      return;
+    }
+
+    const peerId =
+      payload.from;
+
+    const pc =
+      this.ensureMoviePC(
+        peerId
+      );
+
+    try {
+      if (
+        payload.kind ===
+        "offer"
+      ) {
+        if (
+          pc.signalingState !==
+          "stable"
+        ) {
+          try {
+            await pc.setLocalDescription({
+              type:
+                "rollback",
+            });
+
+          } catch {}
+        }
+
+        await pc.setRemoteDescription(
+          payload.sdp
+        );
+
+        await this.flushMovieIce(
+          peerId
+        );
+
+        const answer =
+          await pc.createAnswer();
+
+        await pc.setLocalDescription(
+          answer
+        );
+
+        this.send(
+          "movie-signal",
+          {
+            from:
+              this.peerId,
+
+            to:
+              peerId,
+
+            kind:
+              "answer",
+
+            sdp:
+              pc.localDescription,
+          }
+        );
+
+      } else if (
+        payload.kind ===
+        "answer"
+      ) {
+        if (
+          pc.signalingState ===
+          "have-local-offer"
+        ) {
+          await pc.setRemoteDescription(
+            payload.sdp
+          );
+
+          await this.flushMovieIce(
+            peerId
+          );
+        }
+
+      } else if (
+        payload.kind ===
+          "candidate" &&
+        payload.candidate
+      ) {
+        if (
+          pc.remoteDescription
+        ) {
+          await pc.addIceCandidate(
+            payload.candidate
+          );
+
+        } else {
+          this.movieIceQueues
+            .get(
+              peerId
+            )
+            ?.push(
+              payload.candidate
+            );
+        }
+      }
+
+    } catch (error) {
+      console.warn(
+        "Movie stream signaling issue",
+        error
+      );
+    }
+  }
+
+  async flushMovieIce(peerId) {
+    const pc =
+      this.moviePcs.get(
+        peerId
+      );
+
+    const queue =
+      this.movieIceQueues.get(
+        peerId
+      ) ||
+      [];
+
+    while (
+      pc?.remoteDescription &&
+      queue.length
+    ) {
+      const candidate =
+        queue.shift();
+
+      try {
+        await pc.addIceCandidate(
+          candidate
+        );
+
+      } catch {}
+    }
+  }
+
+  closeMoviePeer(peerId) {
+    const pc =
+      this.moviePcs.get(
+        peerId
+      );
+
+    if (
+      pc
+    ) {
+      try {
+        pc.close();
+
+      } catch {}
+    }
+
+    this.moviePcs.delete(
+      peerId
+    );
+
+    this.movieIceQueues.delete(
+      peerId
+    );
+
+    this.moviePendingOffers.delete(
+      peerId
+    );
+
+    if (
+      !this.isHost
+    ) {
+      this.remoteMovieStream =
+        null;
+
+      this.updateHostStreamVideo();
+    }
+  }
+
+  async startHostStreamCapture() {
+    if (
+      !this.isHost ||
+      !this.video ||
+      typeof this.video
+        .captureStream !==
+        "function"
+    ) {
+      this.toast(
+        "This browser can't stream your video to friends. Try Chrome or Edge.",
+        "bad"
+      );
+
+      return;
+    }
+
+    try {
+      const captured =
+        this.video.captureStream();
+
+      const videoTrack =
+        captured
+          .getVideoTracks()[0];
+
+      await this.ensureMovieAudioContext();
+
+      this.hostStreamAudioDest =
+        this.audioContext
+          .createMediaStreamDestination();
+
+      const audioTrack =
+        this.hostStreamAudioDest
+          .stream
+          .getAudioTracks()[0];
+
+      this.hostMovieStream =
+        new MediaStream(
+          [
+            videoTrack,
+            audioTrack,
+          ].filter(
+            Boolean
+          )
+        );
+
+      for (
+        const peerId
+        of this.participants.keys()
+      ) {
+        if (
+          peerId ===
+          this.peerId
+        ) {
+          continue;
+        }
+
+        this.ensureMoviePC(
+          peerId
+        );
+
+        this.makeMovieOffer(
+          peerId
+        );
+      }
+
+    } catch (error) {
+      console.warn(
+        "Could not start streaming",
+        error
+      );
+
+      this.toast(
+        "Couldn't start streaming your video. You can still watch it locally.",
+        "bad"
+      );
+    }
+  }
+
+  updateHostStreamVideo() {
+    const video =
+      this.root.querySelector(
+        "#host-stream-video"
+      );
+
+    if (
+      !video
+    ) {
+      return;
+    }
+
+    if (
+      this.remoteMovieStream
+    ) {
+      if (
+        video.srcObject !==
+        this.remoteMovieStream
+      ) {
+        video.srcObject =
+          this.remoteMovieStream;
+
+        video.play()
+          .catch(
+            () => {}
+          );
+      }
+
+    } else {
+      video.srcObject =
+        null;
     }
   }
 
@@ -10683,6 +11639,50 @@ class WatchTogetherApp {
         peerId
       );
     }
+
+    for (
+      const peerId
+      of [
+        ...this.moviePcs.keys(),
+      ]
+    ) {
+      this.closeMoviePeer(
+        peerId
+      );
+    }
+
+    if (
+      this.hostMovieStream
+    ) {
+      for (
+        const track
+        of this.hostMovieStream.getTracks()
+      ) {
+        try {
+          track.stop();
+
+        } catch {}
+      }
+
+      this.hostMovieStream =
+        null;
+    }
+
+    if (
+      this.hostStreamAudioDest
+    ) {
+      try {
+        this.hostStreamAudioDest
+          .disconnect();
+
+      } catch {}
+
+      this.hostStreamAudioDest =
+        null;
+    }
+
+    this.remoteMovieStream =
+      null;
 
     this.participants.clear();
 

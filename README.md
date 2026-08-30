@@ -1,15 +1,16 @@
 # WatchTogether — Streamlit Cloud Edition 🎬
 
-A deployable watch-party app for 2–10 friends. Watch a local movie file together (each person selects the same file from their own computer — the movie stays local in the browser) or watch a YouTube video together. Only small synchronization, chat, presence, and WebRTC signaling messages are sent through Supabase Realtime.
+A deployable watch-party app for 2–10 friends. Watch a local movie file together (each person selects the same file from their own computer — the movie stays local in the browser), watch a YouTube video together, or have the host stream their own local movie live to everyone else. Only small synchronization, chat, presence, and WebRTC signaling messages are sent through Supabase Realtime.
 
 ## What this version includes
 
 - Create a watch room with a random `WATCH-XXXXXX` code
 - Shareable invite URL (`?room=WATCH-XXXXXX`)
 - Join by room code or invite link
-- Two watch sources, chosen by the host:
-  - **Local movie file** — browser-only file picker, verified against the host's copy (see below)
+- Three watch sources, chosen by the host:
+  - **Local movie file** — browser-only file picker, verified against the host's copy (see below); everyone needs their own copy of the file
   - **YouTube video** — host pastes a link or video ID; guests join the same video automatically, no upload or extra secret required
+  - **Stream My Video** — only the host needs the file; it's streamed live, peer-to-peer, straight to each friend's browser via WebRTC (same transport as camera/mic). Guests are passive viewers (no seek/rewind). Best for small groups (2-3 guests) — bandwidth scales with viewer count since it's not routed through a server. Unlike the other two modes, the movie does leave the host's device here (directly to friends, never through Streamlit or Supabase)
 - Browser-only local movie picker (`<input type="file">`)
 - Local playback with `URL.createObjectURL(file)`
 - Incremental full-file SHA-256 fingerprinting in 16 MB chunks

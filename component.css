@@ -69,6 +69,7 @@ button { cursor: pointer; }
 .wt-modal-card > p { color:var(--muted); margin:0 0 24px; line-height:1.55; }
 .wt-source-tabs { display:flex; gap:8px; margin:4px 0 18px; }
 .wt-source-tabs .wt-btn { flex:1; }
+.wt-live-badge { display:inline-flex; align-items:center; gap:6px; font-size:12px; font-weight:800; color:#ff9aa5; }
 .wt-form-row { display:grid; gap:7px; margin:15px 0; }
 .wt-form-row label { color:#c7cedf; font-size:12px; font-weight:700; }
 .wt-input, .wt-select { width:100%; min-height:48px; padding:0 14px; color:var(--text); background:#0d111c; border:1px solid var(--border); border-radius:12px; }
